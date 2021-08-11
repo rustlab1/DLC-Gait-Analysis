@@ -1,0 +1,641 @@
+---
+title: "Ladder rung analysis"
+author: "Ruslan Rust"
+date: "8/25/2021"
+output: html_document
+Version: 1.0
+---
+
+# (1) Required Packages, Initialization, Customized Functions, 
+```{r message=FALSE, warning=FALSE}
+# Download required packages 
+packages <-  c("plyr","ggplot2","RColorBrewer","scales", "gridExtra", "FSA", "tidyr", "mise", "stringr", "plotrix", "ggpmisc", "tibble", "forcats", "data.table", "dplyr", "PupillometryR", "gghalves")
+invisible(lapply(packages, library, character.only = TRUE))
+
+# Clearing all previous data, plots 
+mise()
+
+
+# Function
+median_se <- function(x) {
+  x <- na.omit(x)
+  se <- sqrt(var(x) / length(x))
+  med <- median(x)
+  ggplot2:::new_data_frame(list(y = med, 
+                                ymin = med - se, 
+                                ymax = med + se),
+                           n = 1)
+}
+
+```
+
+# (2) Get Raw Data of files we would like to analyse 
+```{r}
+files <- list.files(path = "Raw Files/Raw Ladder /", pattern = "*.csv", full.names = T)
+glimpse(files)
+
+data <- sapply(files, read.table, simplify=F, skip = 2, sep =",", header =T)
+data <- do.call(rbind.data.frame, data)
+
+# Get correct names
+data_header <- read.table(paste("Raw Files/Raw Ladder /0days_Mouse_ID1.csv", sep = ""), sep =",", header =T)
+header_1 <- data.frame(sapply(data_header[1,], as.character), stringsAsFactors=FALSE)
+header_2 <- data.frame(sapply(data_header[2,], as.character), stringsAsFactors=FALSE)
+
+# Add correct names to dataframe df
+names(data) <- paste(header_1[,1],header_2[,1],sep = "_")
+data <- data %>% rownames_to_column("name")  %>%
+  select(-name, everything())
+
+# Create from a wide data frame, "data"  a long data frame "long_data" in the correct structure: time, x_corr, y_corr, likelihood, parameter
+long_data <- NULL
+for(i in 1:((dim(data)[2] - 1) / 3)){
+  long_data <- rbind(long_data,data.frame(time = data[,1], x_corr = data[,3*i-1], y_corr = data[,3*i], likelyhood = data[,3*i+1] , parameter = strsplit(paste(names(data)[3*i-1]),"_")[[1]][1]))
+}
+
+
+# Rename columns and add to long_data (you can add further categories like Video_id, group_id dependent on your experimental set-up)
+day <- as.factor(sub(".*/ *(.*?) *_Mouse.*", "\\1", data[,ncol(data)]))
+mouse <- as.factor(sub(".*Mouse_ *(.*?) *.csv.*", "\\1", data[,ncol(data)]))
+full_id <- as.factor(sub(".*/ *(.*?) *.csv.*", "\\1", data[,ncol(data)]))
+
+long_data <- cbind(long_data, mouse, day, full_id)
+#head(long_data)
+
+
+
+# Assign three videos by symbol l, d, r
+long_data <- long_data %>% mutate(side = case_when(
+  startsWith(as.character(long_data$parameter), "l" ) ~ "left",  
+  startsWith(as.character(long_data$parameter), "d" ) ~ "down",
+  startsWith(as.character(long_data$parameter), "r" ) ~ "right"))
+
+
+```
+
+
+# (3) Quality control
+First, let's identify the ratio of data that has the likelyhood above 0.95 or 95%. We expect to get values close to 90-100%. We look here at every single video recorded from every mouse.
+
+```{r message=FALSE}
+summary_of_reliability <- long_data %>%
+  group_by(mouse, side, day, full_id) %>%
+  mutate(confident= ifelse(likelyhood>0.95, "confident", "non-confident")) %>% # distinguish between confident and non-confident label
+  summarise(success = sum(confident == "confident"),
+            failed = sum(confident == "non-confident"))%>%
+  group_by(full_id, day,  mouse) %>%
+  summarise(success = median(success), failed = median(failed)) %>%
+  mutate(ratio = success/(success+failed)*100) %>%
+  gather(state, value, success:failed ) %>%
+  mutate(state_new = ifelse(state =="success", paste(full_id, state), "nosuccess")) %>%
+  mutate(state_new = factor(state_new)) 
+
+summary_of_reliability$state_new <- fct_relevel(summary_of_reliability$state_new, "nosuccess", after = 0)
+
+
+```
+
+
+(3.1) Bar plot for overview of every video of every mouse
+```{r fig.height=2.5, fig.width=4, warning=FALSE}
+
+# # Set Colors
+mycolors <- c("lightgrey",colorRampPalette(brewer.pal(7, "Set2"))(12)) # grey = fail; colors = success
+
+
+PLOT_bar_all_videos <- ggplot(summary_of_reliability, aes(x=reorder(full_id, desc(full_id)), y = value, fill =state_new))+
+  geom_bar(position = "fill", stat = "identity")+
+  coord_flip()+
+  theme_minimal()+
+  scale_fill_manual(values=mycolors)+
+  theme(text = element_text(size=6))+
+  theme(legend.position = "none")
+PLOT_bar_all_videos
+
+
+```
+
+(3.2) Circular plot for every Video
+```{r fig.height=2.5, fig.width=8}
+# Code 
+
+# # Set Colors
+mycolors2 <- colorRampPalette(brewer.pal(7, "Set2"))(12)
+
+summary_of_reliability2  <- summary_of_reliability %>%
+mutate(state_new = ifelse(state =="success", paste(mouse, state), NA))
+
+# Plot 
+PLOT_Donut_Summary_Validation <- ggplot(summary_of_reliability2, aes(x=2, y = value, fill =state_new))+
+  facet_wrap(day~mouse, nrow=1)+
+  geom_bar(position = "fill", stat = "identity")+
+  geom_text(size =2.8, mapping = aes(x = 0.5, y = 0, label = ifelse(state =="success", paste(round(ratio,digits =1), "%", sep = "") , "")))+
+  xlim(0.5, 2.5) +
+  coord_polar(theta='y')+
+ scale_color_manual(values=mycolors2, na.value="lightgrey")+
+ scale_fill_manual(values=mycolors2, na.value="lightgrey")+
+  theme_void()+
+  theme(plot.margin = unit(c(0, 0, 0, 0), "cm"))+
+  theme(legend.position = "none")
+PLOT_Donut_Summary_Validation
+
+```
+
+# (4) Clean data sets 
+Exclude all unreliable data points and all data points outside of the mouse range
+
+```{r}
+# Where are the data points located on the x and y axis in each frame?
+
+# Make a sample plot, for fast processing 
+long_data_sample <- sample_n(long_data, 10000)
+
+PLOT_control_for_outliers_before <- ggplot(long_data_sample, aes(x=x_corr, y=y_corr))+
+  geom_jitter(aes(fill = mouse), width=0.4, alpha=0.3, pch=21,size=1)+
+  scale_x_continuous(limits = c(0, 3000))+
+ facet_grid(.~side, scales = "free")+
+  theme_minimal()
+PLOT_control_for_outliers_before 
+ 
+
+# Clean the data 
+long_data_clean <- long_data %>% 
+  filter(likelyhood > 0.95) %>% #  this is the most important filter to exclude unreliable data
+  filter(side =="right" & y_corr < 250 &    between(x_corr, 300, 2100) |  # Here we also exclude values that are too far away from mouse reach
+         side == "left" & y_corr > 1250 &  between(x_corr, 300, 2100) | 
+         side == "down" & between(y_corr, 500, 1000) &between(x_corr, 250, 2500) ) 
+
+
+long_data_clean_sample <- sample_n(long_data_clean, 10000)
+
+PLOT_control_for_outliers_after <- ggplot(long_data_clean_sample, aes(x=x_corr, y=y_corr))+
+  geom_jitter(aes(fill = mouse), width=0.4, alpha=0.3, pch=21,size=1)+
+  scale_x_continuous(limits = c(0, 3000))+
+ # scale_y_continuous(limits = c(1700, -100), trans="reverse")+
+  facet_grid(.~side, scales = "free")+
+  theme_minimal()
+PLOT_control_for_outliers_after
+
+
+# flip the left video upside down
+long_data_clean2 <- long_data_clean %>% 
+    mutate(y_corr2 = ifelse(side == "left", y_corr*(-1)+1506, y_corr)) %>% # flip the left video upside down
+    select(-y_corr) %>%
+    dplyr::rename(y_corr = y_corr2)
+
+
+# Distribution of x and y values at the different days 
+PLOT_Overview_Distribution_Y <- ggplot(long_data_clean2, aes(y_corr, fill= side)) +
+  geom_histogram(binwidth= 10)+
+  facet_wrap(side~day, scales = "free", nrow=3)+
+  theme_bw()
+PLOT_Overview_Distribution_Y
+
+PLOT_Overview_Distribution_X <- ggplot(long_data_clean2, aes(x_corr, fill= side)) +
+  geom_histogram(binwidth= 100)+
+  facet_wrap(side~day, scales = "free", nrow=3)+
+  theme_bw()
+PLOT_Overview_Distribution_X
+
+
+```
+
+(4.1) Overview of Typical Mouse Profile. Each frame of a video is normalized to the left hip (left perspecitve), right hip (right perspective), center back (down perspective)
+
+```{r fig.height=6, fig.width=10, warning=FALSE}
+# normalize to l-hip, r-hip, d-tail-base
+df_norm <- long_data_clean2 %>% full_join(filter(long_data_clean, parameter %in% c("r-hip", "d-tail-base", "l-hip")), by = c("full_id", "mouse", "time", "day", "side")) %>%
+  select(mouse, full_id, time, side, day, x_corr.x, y_corr.x, likelyhood.x, parameter.x, x_corr.y, y_corr.y, likelyhood.y, parameter.y) %>% 
+  mutate(x_corr_norm = x_corr.x- x_corr.y) %>%  # New variable y_corr_norm which gives the normalized x-coordinate to the hip
+ filter(full_id %in% c("0days_Mouse_ID1","0days_Mouse_ID3","3days_Mouse_ID5", "3days_Mouse_ID4"))  # example videos
+
+
+
+# We build a  helper function to have control over the range otherwise the facette range may be not 100% symmetrical 
+df_norm<- data.table(df_norm)
+df_norm[side == "right",y_min := 0]
+df_norm[side == "right",y_max := 150]
+df_norm[side == "left",y_min := 0]
+df_norm[side == "left",y_max := 150]
+df_norm[side == "down",y_min := 600]
+df_norm[side == "down",y_max := 900]
+
+colors <- c("#974863","#65c95a","#b259d5","#9cbe32","#636ada","#4da12e","#ce47af","#52c580","#e73379","#338637","#de52a3","#319a6b","#d32f50","#58c8a9","#8b44a3","#b3b23d","#c487e0","#729131","#ab3474","#99bb6e","#5861a7","#d1a63b","#8096e0","#e16926","#3dc2cc","#b53624","#50a2d1","#ea6342","#38907c","#e1625f","#226a4d","#de628a","#327243","#e08dbe","#546e19","#975e9e","#e18e31","#99527c","#6faa75","#a4464e","#486a2d","#dc827f","#6d8b4c","#b66024","#bab06d","#9c5831","#90812a","#dd9c6c","#666123","#916d31")
+
+
+# Here we plot all coordinates of each parameter by normalizing to the hip-x (Left,right) and d-center back-value
+PLOT_overview_steps <- ggplot(df_norm, aes(x=x_corr_norm, y=y_corr.x))+
+  geom_jitter(aes(fill = factor(parameter.x)), colour = "black", width = 0.10, shape=21, size =1, alpha = 0.4)+ #parameter.x or mouse
+  scale_y_continuous(limits = c(NA, NA)) +
+  scale_fill_manual(values=colors) +
+  facet_grid(side~full_id, scales = "free")+
+  scale_x_continuous(limits = c(-120, 350))+
+  geom_blank(aes(y = y_min)) +
+ geom_blank(aes(y = y_max))+
+  theme_bw()
+PLOT_overview_steps
+
+
+
+```
+
+# (5) What is a step?
+Before looking at errors, we first need to define what is a step. Our analysis suggests that toe speed from down perspective is a good predictor of steps
+(5.1) Determine what is a step?
+
+```{r fig.height=4, fig.width=10}
+
+# Divide dataset in front and back 
+pre_down_analysis <- long_data_clean2 %>% filter(side == "down") %>%
+  mutate(limb = ifelse(parameter %in% c("d-front-left", 
+                                        "d-front-right", 
+                                        "d-head"), "front", 
+                       ifelse(parameter %in% c("d-back-left",
+                                               "d-back-right", 
+                                               "d-tail-base"), "back", "none"))) %>%
+  mutate(side = ifelse(parameter %in% c( "d-front-left", 
+                                         "d-back-left", 
+                                         "d-head", "d-tail-base"), "left", 
+                       ifelse(parameter %in% c("d-front-right",
+                                               "d-back-right"), "right", "none")))
+
+
+# Identify the speed of toe tips, this is a good indicator if the mouse is in a stance or swing position 
+Speed_down_pre <- pre_down_analysis %>% 
+  group_by(day, mouse, parameter, full_id) %>%
+  mutate(speed = abs(x_corr- lag(x_corr, default = first(x_corr)))) %>% # calculate speed from pervious x_coor
+  mutate(phase = ifelse(speed >12, NA, parameter)) %>% # Speed defined as 12 pixels/frame  
+  mutate(phase_names = ifelse(speed >7, "swing", "stance")) %>% # define swing and stance
+  mutate(phase_numbers = cumsum(phase_names != lag(phase_names, default= first(phase_names)))) %>% # count phases
+  group_by(full_id, phase_numbers) %>%
+  mutate(Max_speed = max(speed))  %>% # max speed per phase number
+  filter(Max_speed < 100) %>%   # max speed is in pixel per frames 
+  group_by(full_id) %>%
+  mutate(Max_steps = max(phase_numbers)) %>%
+  group_by(day, full_id, parameter, phase_numbers, phase_names) %>%
+  mutate(Max_Time_in_phase = max(time)-min(time)) %>%
+  mutate(day_Num = as.numeric(gsub("[^0-9.]", "",  day))) # Make new column with numeric day
+
+
+# subset only toes and convert pixel per frames in cm/s 
+Speed_down <- Speed_down_pre %>% 
+   filter(parameter %in% c("d-front-left","d-front-right", "d-back-left","d-back-right")) %>%
+   mutate(Max_speed_true = Max_speed/31.3667*60) %>% # convert pixel per frames in cm/s 
+   mutate(speed_true = speed/31.3667*60) %>%
+  ungroup()
+
+
+# the order is important here 
+Speed_down$side <- factor(Speed_down$side, levels =c("right", "left"))
+Speed_down$limb <- factor(Speed_down$limb, levels =c("back", "front"))
+
+limbcolors <- brewer.pal(4, "Set1")
+mycolors3 <- colorRampPalette(brewer.pal(6, "Set2"))(6)
+
+
+# We select individual videos and look how the speed determines a step cycle
+Speed_down_select <- Speed_down %>% filter(full_id %in% c("0days_Mouse_ID1", "3days_Mouse_ID1")) 
+ 
+# Plot the walk profile from down as a function of speed. It is probably the best parameter so far to determine steps.
+PLOT_Speed <- ggplot(Speed_down, aes(x=time, y = speed_true)) +
+  geom_line(aes(color=parameter)) +
+ facet_wrap(side~limb~full_id, scales = "free", ncol=4)+
+  #geom_hline(yintercept=10)+
+  theme(strip.text = element_text(size=15))+
+  theme(legend.position = "none")+
+  scale_color_manual(values=limbcolors)+
+  scale_fill_manual(values=limbcolors)+
+  stat_peaks(colour = "blue",  span = 21, strict = T, ignore_threshold = 0.2, size = 2) + # adapt to your set-up 
+  theme_minimal()
+
+PLOT_Speed_exp <- ggplot(Speed_down_select, aes(x=time, y = speed_true)) +
+  geom_line(aes(color=parameter)) +
+ facet_wrap(side~limb~full_id, scales = "free", ncol=4)+
+  #geom_hline(yintercept=10)+
+  theme(strip.text = element_text(size=15))+
+  theme(legend.position = "none")+
+  scale_color_manual(values=limbcolors)+
+  scale_fill_manual(values=limbcolors)+
+  stat_peaks(colour = "blue",  span = 21, strict = T, ignore_threshold = 0.2, size = 2) + # adapt to your set-up 
+  theme_minimal()
+PLOT_Speed_exp
+
+
+```
+
+(5.2) Extract the "Peaks" from PLOT_Speed to data frame in order to get information about steps
+
+
+```{r fig.height=20, fig.width=20}
+
+info_steps_peak <-layer_data(PLOT_Speed, 2)
+info_steps_peak <- select(info_steps_peak,x, PANEL)
+
+# The only information from info_steps_peak that we have are the PANELs of the facet_wrap, therefore we need to reconstruct the information about right and left AND back and front: 
+
+nov <- max(as.numeric(info_steps_peak$PANEL)) # Panel = 4x Video_no
+
+info_steps_peak$side <- ifelse(info_steps_peak$PANEL %in% c(seq(1,nov/2,1)), "right", "left")  # make sure the order is correct
+info_steps_peak$limb <- ifelse(info_steps_peak$PANEL %in% c(seq(1,nov*1/4,1),seq(nov/2+1,nov*3/4,1)), "back", "front") # make sure the order is correct
+
+# Transform the info_steps_peak into data.table for further analysis
+
+info_steps_peak <- data.table(info_steps_peak)
+
+# Count the steps for every valley, they always need to start at 1 for every PANEL 
+info_steps_peak <- info_steps_peak %>%
+  group_by(PANEL) %>%
+  mutate(steps = row_number())
+
+
+# We need to make sure that PANEL represents the ID of df_vertical for the MERGE of data.tables:
+
+info_steps_peak$CUT <- cut(as.numeric(info_steps_peak$PANEL), breaks=c(0,nov*1/4,nov*2/4,nov*3/4,nov*4/4), labels=c(0,nov*1/4,nov*2/4,nov*3/4))
+info_steps_peak$CUT <- as.numeric(as.character(info_steps_peak$CUT))
+info_steps_peak$PANEL <- as.numeric(as.character(info_steps_peak$PANEL))
+
+info_steps_peak_2 <- mutate(info_steps_peak, ID = PANEL-CUT)
+info_steps_peak_2$ID <- factor(info_steps_peak_2$ID)
+
+info_steps_peak_2 <- data.table(info_steps_peak_2) 
+
+
+```
+
+(5.3) Merge the generated information about steps with with the side perspective  "vertical_df"
+```{r message=FALSE, warning=FALSE}
+
+vertical_df <- long_data_clean2 %>% 
+  filter(likelyhood > 0.95) %>%
+  filter(side != "down") %>% 
+  mutate(limb = ifelse(parameter %in% c("l-wrist",
+                                        "l-front-toe-tip", 
+                                        "l-elbow", 
+                                        "l-shoulder", 
+                                        "r-wrist",
+                                        "r-front-toe-tip", 
+                                        "r-elbow", 
+                                        "r-shoulder", "l-head", "r-head"), "front", 
+                ifelse(parameter %in% c("l-back-ankle",
+                                        "l-back-toe", 
+                                        "r-back-ankle",
+                                        "r-back-toe", "l-hip", "r-hip", "l-iliac-crest", "r-iliac-crest", "l-tail-base", "r-tail-base"), "back", "none"))) %>% 
+  filter(side != "down") %>%
+  arrange(full_id) %>%  
+  mutate(ID = cumsum(!duplicated(full_id)))
+
+# make hip height  everywhere around 0
+hip_norm <- vertical_df %>% 
+  filter(parameter %in% c("l-hip", "r-hip")) %>%
+  select(side, full_id, time, y_corr) %>%
+  group_by(side,full_id) %>%
+  summarize(y_corr_hip = mean(y_corr))
+ 
+toe_norm  <- vertical_df %>% 
+  filter(parameter %in% c("r-back-toe","l-back-toe", "r-front-toe-tip", "l-front-toe-tip")) %>% 
+  select(side, full_id, time, y_corr) %>%
+  group_by(side,full_id) %>%
+  summarize(y_corr_toe = median(y_corr))
+
+  
+vertical_df_norm <- vertical_df %>% 
+  full_join(hip_norm, by = c("full_id", "side")) %>%
+  full_join(toe_norm, by = c("full_id", "side")) %>%
+  mutate(y_norm_hip = y_corr- y_corr_hip ) %>%
+  mutate(y_norm_toe = y_corr- y_corr_toe ) %>%
+  mutate(ID = cumsum(!duplicated(full_id))) %>%
+  filter(parameter %in% c("r-front-toe-tip", "l-front-toe-tip",  "r-back-toe", "l-back-toe", "l-hip", "r-hip", "l-shoulder", "r-shoulder","r-wrist", "l-wrist", "r-back-ankle", "l-back-ankle")) %>%
+  select(-y_corr) %>% rename(y_corr = y_norm_toe)
+
+
+
+vertical_df_norm$ID <- factor(vertical_df_norm$ID)
+
+
+
+# We perform a  non-equi join to merge the data frames 
+vertical_df_steps <- info_steps_peak_2[vertical_df_norm,.(mouse, full_id, day, limb,side,i.time, x.x, x.steps, parameter, y_corr, x_corr),
+                                          on=.(x <= time, side=side, limb =limb, ID=ID),  allow.cartesian=TRUE, mult ="last"]
+
+# Add parameter_short, important for subsequent analysis 
+vertical_df_steps$parameter_short <- substr(vertical_df_steps$parameter, 3, nchar(as.character(vertical_df_steps$parameter)))
+vertical_df_steps$side <- factor(vertical_df_steps$side, levels =c("right", "left"))
+vertical_df_steps$limb <- factor(vertical_df_steps$limb, levels =c("back", "front"))
+
+vertical_df_steps <- rename(vertical_df_steps, phase_numbers = x.steps)
+vertical_df_steps <- rename(vertical_df_steps, time = i.time)
+
+vertical_df_corr <- vertical_df_steps %>%
+  group_by(full_id, side,limb, day ,parameter, parameter_short, phase_numbers) %>%
+  summarize(y_corr_max = max(y_corr)) %>%
+  filter(parameter_short %in% c("hip", "shoulder"))
+
+vertical_df_steps_norm <- vertical_df_steps %>% left_join(vertical_df_corr, by = c("full_id", "side", "limb", "phase_numbers", "day")) %>%  # correction
+  mutate(y_corr_norm = y_corr - y_corr_max) %>%
+  select(-parameter_short.y, -parameter.y) %>%
+  rename(parameter = parameter.x, parameter_short = parameter_short.x)
+
+
+```
+
+
+
+# (6) Look at typical profile from side perspective 
+
+```{r fig.height=2.5, fig.width=10}
+
+
+# Plot the data, you should see a regular pattern and vertical lines determining the step cycle
+validation_vertical_df_steps_test <- vertical_df_steps_norm %>% filter(parameter %in% c("r-wrist", "l-wrist", 
+                                                                                   "r-back-ankle", "l-back-ankle",
+                                                                                   "l-back-toe", "r-back-toe",
+                                                                                   "l-front-toe-tip", "r-front-toe-tip",
+                                                                                   "l-shoulder", "r-shoulder",
+                                                                                   "l-hip", "r-hip"))
+
+
+
+validation_vertical_df_steps_test$side <- factor(validation_vertical_df_steps_test$side, levels =c("right", "left"))
+validation_vertical_df_steps_test <- validation_vertical_df_steps_test %>% group_by(full_id, side, limb, phase_numbers) %>% mutate(x_time = min(time)) 
+
+validation_vertical_df_steps_select <- validation_vertical_df_steps_test %>%
+   filter(full_id %in% c("3days_Mouse_ID4"))
+
+
+PLOT_validation_step_region <- ggplot(validation_vertical_df_steps_select, aes(x=time, y=y_corr_norm))+
+  geom_line(aes(color=factor(parameter_short)))+
+   facet_wrap(side~limb~full_id, ncol=4)+
+  scale_x_continuous(limits = c(NA, NA))+
+  scale_y_continuous(limits = c(NA, NA))+
+  theme_classic()+
+  theme(strip.text = element_text(size=4))
+PLOT_validation_step_region
+
+```
+
+(7) Overall error during ladder rung test 
+
+```{r fig.height=4, fig.width=7, message=FALSE, warning=FALSE}
+summary_error_analysis <-  vertical_df_steps_norm %>%
+  drop_na() %>%
+  filter(parameter %in% c("r-front-toe-tip", "l-front-toe-tip",  "r-back-toe", "l-back-toe")) %>%
+  group_by(full_id, side,limb, day ,parameter,phase_numbers) %>%
+  summarize(y_corr_min = min(y_corr_norm)) %>%
+mutate(ERROR2 = ifelse(y_corr_min < -65 &  limb =="back", "error", "ok")) %>% # correction factor
+  mutate(ERROR = ifelse(y_corr_min < -57 & limb == "front", "error", ERROR2)) %>%
+  mutate(all_steps = max(phase_numbers, na.rm = T)) %>%
+  group_by(full_id, day, side, limb, parameter, all_steps) %>%
+  summarise(success = sum(ERROR == "ok"), error = sum(ERROR == "error")) %>%
+  mutate(ratio = error/all_steps*100) 
+
+
+summary_error_analysis_str_nonstr <- summary_error_analysis %>%
+  filter(day %in% c("0days", "3days")) %>%
+  mutate(stroked = ifelse(day == "0days", "intact", "stroked"))
+
+
+mycolors <- c("grey", "red")
+
+# Plot Error vs Non-Error
+PLOT_Error_str_non_str<- ggplot(summary_error_analysis_str_nonstr, aes(stroked, ratio)) +
+  geom_violin(aes(fill=stroked), trim = T, alpha = 0.8)+
+   geom_jitter(aes(fill = stroked), width=0.05, alpha=0.2, pch=21,size=2.5, fill="lightgrey")+
+   stat_summary(fun=median, geom="point", shape=23, size=4, color="black", fill ="white")+
+  scale_y_continuous(limits = c(0, NA)) +
+  scale_fill_manual(values=mycolors)+
+  theme_bw()
+PLOT_Error_str_non_str
+
+
+summary_error_analysis_str_nonstr2 <- summary_error_analysis_str_nonstr %>%
+  unite(joint, side, limb,stroked, sep = "_", remove = F) %>% 
+    mutate(joint = factor(joint, levels = c("left_front_intact", "left_front_stroked", "left_back_intact","left_back_stroked" , "right_back_intact", "right_back_stroked", "right_front_intact", "right_front_stroked")))
+
+
+mycolors <- c("grey", "red")
+
+limbcolors <- brewer.pal(4, "Set1")
+limbcolors2 <- c("grey", "#E41A1C","grey", "#377EB8","grey", "#4DAF4A","grey", "#984EA3")
+
+
+# Plot Overview 
+PLOT_HL_overview <- ggplot(summary_error_analysis_str_nonstr2, aes(x = stroked, y = ratio, fill = joint)) +
+  geom_flat_violin(aes(fill = joint),position = position_nudge(x = .15, y = 0), adjust = 1.5, trim = FALSE, alpha = .8, colour = NA)+
+  geom_boxplot(outlier.shape = NA, alpha = 0.3, width = .15, colour = "BLACK", fill = "NA",    position=position_dodge(10))+
+  facet_wrap(limb~side, nrow=1)+
+  geom_half_point(side = "l",   range_scale = .3, alpha = .4, aes(color=joint), position = position_nudge(x = -.02, y = 0),)+
+  stat_summary(fun=median, geom="point", shape=23, size=3, color="black", fill ="white")+
+  scale_y_continuous(limits = c(0, NA)) +
+    scale_fill_manual(values=limbcolors2)+
+    scale_color_manual(values=limbcolors2)+
+  theme_bw()
+
+PLOT_HL_overview
+
+
+```
+# (8) Time course of missteps 
+
+```{r fig.height=3, fig.width=10, message=FALSE, warning=FALSE}
+
+# S
+summary_error_analysis <-  vertical_df_steps %>%
+  drop_na() %>%
+  group_by(full_id, mouse, side,limb, day ,parameter,phase_numbers) %>%
+  summarize(y_corr_min = min(y_corr)) %>%
+  mutate(ERROR2 = ifelse(y_corr_min < -11 &  side =="left", "error", "ok")) %>%
+  mutate(ERROR = ifelse(y_corr_min < -14 & side == "right", "error", ERROR2)) %>%
+  mutate(all_steps = max(phase_numbers, na.rm = T))  %>%
+  group_by(full_id, mouse, day, side, limb, parameter, all_steps) %>%
+  summarise(success = sum(ERROR == "ok"), error = sum(ERROR == "error")) %>%
+  mutate(ratio = error/all_steps*100)  %>%
+  filter(parameter %in% c("r-front-toe-tip", "l-front-toe-tip",  "r-back-toe", "l-back-toe"))
+
+# Exclude all with <4 steps and >20
+summary_error_analysis2 <- summary_error_analysis %>%
+  filter(all_steps>4) %>% filter(all_steps<15) %>%
+  mutate(parameter = factor(parameter, levels = c("l-front-toe-tip", "l-back-toe", "r-back-toe", "r-front-toe-tip")))
+  
+
+summary_error_analysis3 <- summary_error_analysis2%>%
+  filter(day %in% c("0days", "3days"))
+
+limbcolors <- brewer.pal(4, "Set1")
+
+PLOT_Error<- ggplot(summary_error_analysis3, aes(day, ratio)) +
+  geom_violin(aes(fill = parameter), trim = F)+
+   geom_jitter(width=0.1, alpha=0.4, pch=21,size=2.5, fill ="lightgrey")+
+   stat_summary(fun=mean, geom="point", shape=23, size=4, color="black", fill ="white")+
+  facet_wrap(.~parameter, nrow=1)+
+  scale_y_continuous(limits = c(-0.5, NA)) +
+ scale_color_manual(values=limbcolors)+
+ scale_fill_manual(values=limbcolors)+
+  theme_bw()
+PLOT_Error
+
+
+summary_error_analysis$day_Num <- as.numeric(gsub("[^0-9.]", "",  summary_error_analysis$day))
+summary_error_analysis2$day_Num <- as.numeric(gsub("[^0-9.]", "",  summary_error_analysis2$day))
+summary_error_analysis2$pub = "error_rate"
+
+
+limbcolors <- brewer.pal(4, "Set1")
+
+PLOT_Error_line <- ggplot(summary_error_analysis2, aes(x=(day_Num), y = ratio))+
+  stat_summary(aes(fill=parameter), geom="ribbon", fun.data = "mean_se",  alpha=0.2) +
+  stat_summary(aes(color=parameter),fun=mean, geom="line") +
+  stat_summary(aes(fill=parameter), fun=mean, geom="point", color = "black", shape=21, size =3, alpha = 0.7) +
+ facet_wrap(pub~parameter, nrow=1)+
+  scale_fill_manual(values=c(limbcolors))+ 
+  scale_color_manual(values=c(limbcolors))+ 
+  scale_y_continuous(limits = c(NA, NA))+
+  theme_bw()
+PLOT_Error_line
+
+
+
+```
+
+# (9) Summary all plots
+
+```{r}
+
+
+ # ggsave("Output_LadderRung_Analysis/Output_LadderRung_Figures/1_PLOT_bar_all_videos.pdf", PLOT_bar_all_videos, width=4, height=2.5)
+ # ggsave("Output_LadderRung_Analysis/Output_LadderRung_Figures/2_PLOT_Donut_Summary_Validation.pdf", PLOT_Donut_Summary_Validation, width=10, height=3)
+ # ggsave("Output_LadderRung_Analysis/Output_LadderRung_Figures/3_1_PLOT_control_for_outliers_before.pdf", PLOT_control_for_outliers_before, width=5, height=4)
+ # ggsave("Output_LadderRung_Analysis/Output_LadderRung_Figures/3_2_PLOT_control_for_outliers_after.pdf", PLOT_control_for_outliers_after, width=5, height=4)
+ # ggsave("Output_LadderRung_Analysis/Output_LadderRung_Figures/4_1_PLOT_Overview_Distribution_X.pdf", PLOT_Overview_Distribution_X, width=8, height=8)
+ # ggsave("Output_LadderRung_Analysis/Output_LadderRung_Figures/4_2_PLOT_Overview_Distribution_Y.pdf", PLOT_Overview_Distribution_Y, width=8, height=8)
+ # ggsave("Output_LadderRung_Analysis/Output_LadderRung_Figures/5_PLOT_overview_steps.pdf", PLOT_overview_steps, width=12, height=8)
+ # ggsave("Output_LadderRung_Analysis/Output_LadderRung_Figures/5_1_PLOT_Speed.pdf", PLOT_Speed, width=13, height=5)
+ # ggsave("Output_LadderRung_Analysis/Output_LadderRung_Figures/6_PLOT_validation_step_region.pdf", PLOT_validation_step_region, width=8, height=3)
+ # ggsave("Output_LadderRung_Analysis/Output_LadderRung_Figures/7_1_PLOT_Overall_errror_rate.pdf", PLOT_Error_str_non_str, width=4.2, height=2.5, limitsize =F)
+ # ggsave("Output_LadderRung_Analysis/Output_LadderRung_Figures/7_2_PLOT_horizontal_ladder_overview.pdf", PLOT_HL_overview, width = 7, height = 2.5)
+ # ggsave("Output_LadderRung_Analysis/Output_LadderRung_Figures/7_3_Error_rate_violin.pdf", PLOT_Error, width = 8, height = 3)
+ # ggsave("Output_LadderRung_Analysis/Output_LadderRung_Figures/7_4_Error_rate_line.pdf", PLOT_Error_line, width = 6.8, height =2.5)
+```
+
+
+
+# (10) Summmary of raw files
+
+```{r message=FALSE, warning=FALSE}
+
+# Generate raw and summarized data 
+raw_files <- summary_error_analysis_str_nonstr2
+glimpse(raw_files)
+
+sum_overview_day <- summary_error_analysis2 %>%
+  group_by(parameter, day) %>%
+  summarize(median = median(ratio), mean = mean(ratio), sd = sd(ratio))
+glimpse(sum_overview_day)
+
+# Export all .csv files 
+
+#write.csv(raw_files, "Output_LadderRung_Analysis/Output_LadderRung_csv/raw_values.csv")
+#write.csv(sum_overview_day, "Output_LadderRung_Analysis/Output_LadderRung_csv/summary_values.csv")
+
+```
+
+

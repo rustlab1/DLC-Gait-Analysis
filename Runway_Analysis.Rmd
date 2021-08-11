@@ -1,0 +1,1280 @@
+---
+name: Ruslan Rust
+date: 2021-03-25
+title: "Runway Analysis"
+output: html_document
+version: 1.0
+---
+
+# (1) Required Packages, Initialization, Customized Functions, 
+```{r message=FALSE, warning=FALSE}
+# Download these required packages 
+packages <-  c("plyr","ggplot2","RColorBrewer","scales","emmeans", "gridExtra", "FSA", "tidyr", "mise", "stringr", "plotrix", "ggpmisc", "tibble", "forcats", "data.table", "dplyr")
+invisible(lapply(packages, library, character.only = TRUE))
+
+# Clearing all previous data, plots, etc
+mise()
+
+# Required Function
+median_se <- function(x) {
+  x <- na.omit(x)
+  se <- sqrt(var(x) / length(x))
+  med <- median(x)
+  ggplot2:::new_data_frame(list(y = med, 
+                                ymin = med - se, 
+                                ymax = med + se),
+                           n = 1)
+}
+```
+
+# (2) Get Raw Data of csv files you received as output from DeepLabCut  
+```{r}
+#load all .csv files in in the Folder "Raw Files/Raw Runway/" 
+files <- list.files(path = "Raw Files/Raw Runway/", pattern = "*.csv", full.names = T)
+#glimpse(files)
+
+data <- sapply(files, read.table, simplify=F, skip = 2, sep =",", header =T) # Read In all data with data.table
+data <- do.call(rbind.data.frame, data) 
+
+# Get correct names
+data_header <- read.table(paste("Raw Files/Raw Runway/0days_Mouse_ID1.csv", sep = ""), sep =",", header =T) # Take header of one of the files (they are all identical)
+header_1 <- data.frame(sapply(data_header[1,], as.character), stringsAsFactors=FALSE)
+header_2 <- data.frame(sapply(data_header[2,], as.character), stringsAsFactors=FALSE)
+
+names(data) <- paste(header_1[,1],header_2[,1],sep = "_")
+data <- data %>% rownames_to_column("name")  %>%
+  select(-name, everything())
+
+# Create from a wide data frame, "data"  a long data frame "long_data" in the correct structure: time, x_corr, y_corr, likelihood, parameter
+long_data <- NULL
+for(i in 1:((dim(data)[2] - 1) / 3)){
+  long_data <- rbind(long_data,data.frame(time = data[,1], x_corr = data[,3*i-1], y_corr = data[,3*i], likelyhood = data[,3*i+1] , parameter = strsplit(paste(names(data)[3*i-1]),"_")[[1]][1]))
+}
+
+# Rename columns and add to long_data (you can add further categories like Video_id, group_id dependent on your experimental set-up)
+day <- as.factor(sub(".*/ *(.*?) *_Mouse.*", "\\1", data[,ncol(data)]))
+mouse <- as.factor(sub(".*Mouse_ *(.*?) *.csv.*", "\\1", data[,ncol(data)]))
+full_id <- as.factor(sub(".*/ *(.*?) *.csv.*", "\\1", data[,ncol(data)]))
+
+long_data <- cbind(long_data, mouse, day, full_id)
+
+# Assign the videos by symbol l, d, r -> they referred to the video perspective left, down and right. You create a new column "side"
+long_data <- long_data %>% mutate(side = case_when(
+  startsWith(as.character(long_data$parameter), "l" ) ~ "left",  
+  startsWith(as.character(long_data$parameter), "d" ) ~ "down",
+  startsWith(as.character(long_data$parameter), "r" ) ~ "right"))
+
+
+
+```
+
+
+# (3) Quality control
+First, let's identify the ratio of data that has the likelyhood above 0.95 or 95%. We expect to get values close to 90-100%. We look here at every single video recorded from every mouse.
+
+```{r message=FALSE}
+summary_of_reliability <- long_data %>%
+  group_by(mouse, side, day, full_id) %>%
+  mutate(confident= ifelse(likelyhood>0.95, "confident", "non-confident")) %>% # distinguish between confident and non-confident label
+  summarise(success = sum(confident == "confident"),
+            failed = sum(confident == "non-confident"))%>%
+  group_by(full_id, day,  mouse) %>%
+  summarise(success = median(success), failed = median(failed)) %>%
+  mutate(ratio = success/(success+failed)*100) %>%
+  gather(state, value, success:failed ) %>%
+  mutate(state_new = ifelse(state =="success", paste(full_id, state), "nosuccess")) %>%
+  mutate(state_new = factor(state_new)) 
+
+summary_of_reliability$state_new <- fct_relevel(summary_of_reliability$state_new, "nosuccess", after = 0)
+
+
+```
+
+
+(3.1) Bar plot for overview of every video of every mouse
+```{r fig.height=2.5, fig.width=4, warning=FALSE}
+
+# # Set Colors
+mycolors <- c("lightgrey",colorRampPalette(brewer.pal(7, "Set2"))(12)) # grey = fail; colors = success
+
+
+PLOT_bar_all_videos <- ggplot(summary_of_reliability, aes(x=reorder(full_id, desc(full_id)), y = value, fill =state_new))+
+  geom_bar(position = "fill", stat = "identity")+
+  coord_flip()+
+  theme_minimal()+
+  scale_fill_manual(values=mycolors)+
+  theme(text = element_text(size=6))+
+  theme(legend.position = "none")
+PLOT_bar_all_videos
+
+
+```
+
+(3.2) Circular plot for every Video
+```{r fig.height=2.5, fig.width=8}
+# Code 
+
+# # Set Colors
+mycolors2 <- colorRampPalette(brewer.pal(7, "Set2"))(12)
+
+summary_of_reliability2  <- summary_of_reliability %>%
+mutate(state_new = ifelse(state =="success", paste(mouse, state), NA))
+
+# Plot 
+PLOT_Donut_Summary_Validation <- ggplot(summary_of_reliability2, aes(x=2, y = value, fill =state_new))+
+  facet_wrap(day~mouse, nrow=1)+
+  geom_bar(position = "fill", stat = "identity")+
+  geom_text(size =2.8, mapping = aes(x = 0.5, y = 0, label = ifelse(state =="success", paste(round(ratio,digits =1), "%", sep = "") , "")))+
+  xlim(0.5, 2.5) +
+  coord_polar(theta='y')+
+ scale_color_manual(values=mycolors2, na.value="lightgrey")+
+ scale_fill_manual(values=mycolors2, na.value="lightgrey")+
+  theme_void()+
+  theme(plot.margin = unit(c(0, 0, 0, 0), "cm"))+
+  theme(legend.position = "none")
+PLOT_Donut_Summary_Validation
+
+```
+
+# (4) Clean data sets 
+Exclude all unreliable data points and all data points outside of the mouse range
+
+```{r}
+# Where are the data points located on the x and y axis in each frame?
+
+# Make a sample plot, for fast processing 
+long_data_sample <- sample_n(long_data, 10000)
+
+PLOT_control_for_outliers_before <- ggplot(long_data_sample, aes(x=x_corr, y=y_corr))+
+  geom_jitter(aes(fill = mouse), width=0.4, alpha=0.3, pch=21,size=1)+
+  scale_x_continuous(limits = c(0, 3000))+
+ facet_grid(.~side, scales = "free")+
+  theme_minimal()
+PLOT_control_for_outliers_before 
+ 
+
+# Clean the data 
+long_data_clean <- long_data %>% 
+  filter(likelyhood > 0.95) %>% #  this is the most important filter to exclude unreliable data
+  filter(side =="right" & y_corr < 250 &    between(x_corr, 300, 2100) |  # Here we also exclude values that are too far away from mouse reach
+         side == "left" & y_corr > 1250 &  between(x_corr, 300, 2100) | 
+         side == "down" & between(y_corr, 500, 1000) &between(x_corr, 250, 2500) ) 
+
+long_data_clean_sample <- sample_n(long_data_clean, 10000)
+
+PLOT_control_for_outliers_after <- ggplot(long_data_clean_sample, aes(x=x_corr, y=y_corr))+
+  geom_jitter(aes(fill = mouse), width=0.4, alpha=0.3, pch=21,size=1)+
+  scale_x_continuous(limits = c(0, 3000))+
+ # scale_y_continuous(limits = c(1700, -100), trans="reverse")+
+  facet_grid(.~side, scales = "free")+
+  theme_minimal()
+PLOT_control_for_outliers_after
+
+
+# flip the left video upside down
+long_data_clean2 <- long_data_clean %>% 
+    mutate(y_corr2 = ifelse(side == "left", y_corr*(-1)+1506, y_corr)) %>% # flip the left video upside down
+    select(-y_corr) %>%
+    dplyr::rename(y_corr = y_corr2)
+
+
+# Distribution of x and y values at the different days 
+PLOT_Overview_Distribution_Y <- ggplot(long_data_clean2, aes(y_corr, fill= side)) +
+  geom_histogram(binwidth= 10)+
+  facet_wrap(side~day, scales = "free", nrow=3)+
+  theme_bw()
+PLOT_Overview_Distribution_Y
+
+PLOT_Overview_Distribution_X <- ggplot(long_data_clean2, aes(x_corr, fill= side)) +
+  geom_histogram(binwidth= 100)+
+  facet_wrap(side~day, scales = "free", nrow=3)+
+  theme_bw()
+PLOT_Overview_Distribution_X
+
+
+```
+
+(4.1) Overview of Typical Mouse Profile. Each frame of a video is normalized to the left hip (left perspecitve), right hip (right perspective), center back (down perspective)
+
+```{r fig.height=6, fig.width=10, warning=FALSE}
+# normalize to l-hip, r-hip, d-center-back
+df_norm <- long_data_clean2 %>% full_join(filter(long_data_clean, parameter %in% c("r-hip", "d-center-back", "l-hip")), by = c("full_id", "mouse", "time", "day", "side")) %>%
+  select(mouse, full_id, time, side, day, x_corr.x, y_corr.x, likelyhood.x, parameter.x, x_corr.y, y_corr.y, likelyhood.y, parameter.y) %>% 
+  mutate(x_corr_norm = x_corr.x- x_corr.y) %>%  # New variable y_corr_norm which gives the normalized x-coordinate to the hip
+ filter(full_id %in% c("0days_Mouse_ID1","0days_Mouse_ID2","3days_Mouse_ID1", "3days_Mouse_ID2"))  # example videos
+
+
+# We build a  helper function to have control over the range otherwise the facette range may be not 100% symmetrical 
+df_norm<- data.table(df_norm)
+df_norm[side == "right",y_min := 20]
+df_norm[side == "right",y_max := 150]
+df_norm[side == "left",y_min := 20]
+df_norm[side == "left",y_max := 150]
+df_norm[side == "down",y_min := 650]
+df_norm[side == "down",y_max := 850]
+
+colors <- c("#974863","#65c95a","#b259d5","#9cbe32","#636ada","#4da12e","#ce47af","#52c580","#e73379","#338637","#de52a3","#319a6b","#d32f50","#58c8a9","#8b44a3","#b3b23d","#c487e0","#729131","#ab3474","#99bb6e","#5861a7","#d1a63b","#8096e0","#e16926","#3dc2cc","#b53624","#50a2d1","#ea6342","#38907c","#e1625f","#226a4d","#de628a","#327243","#e08dbe","#546e19","#975e9e","#e18e31","#99527c","#6faa75","#a4464e","#486a2d","#dc827f","#6d8b4c","#b66024","#bab06d","#9c5831","#90812a","#dd9c6c","#666123","#916d31")
+
+
+# Here we plot all coordinates of each parameter by normalizing to the hip-x (Left,right) and d-center back-value
+PLOT_overview_steps <- ggplot(df_norm, aes(x=x_corr_norm, y=y_corr.x))+
+  geom_jitter(aes(fill = factor(parameter.x)), colour = "black", width = 0.10, shape=21, size =1, alpha = 0.4)+ #parameter.x or mouse
+  scale_y_continuous(limits = c(NA, NA)) +
+  scale_fill_manual(values=colors) +
+  facet_grid(side~full_id, scales = "free")+
+  scale_x_continuous(limits = c(-120, 260))+
+  geom_blank(aes(y = y_min)) +
+ geom_blank(aes(y = y_max))+
+  theme_bw()
+PLOT_overview_steps
+
+
+
+```
+
+# (5) Down Side Analysis: General parameters 
+(5.1) Create an overview about step profile
+To do this we first need to define what is a step. Our analysis suggests that toe speed is a good predictor of steps. 
+ 
+```{r fig.height=3, fig.width=8, warning=FALSE}
+# Divide dataset in front and back 
+pre_down_analysis <- long_data_clean2 %>% filter(side == "down") %>%
+  mutate(limb = ifelse(parameter %in% c("d-center-front",
+                                        "d-front-left", 
+                                        "d-front-right", 
+                                        "d-head"), "front", 
+                       ifelse(parameter %in% c("d-back-left",
+                                               "d-back-right", 
+                                               "d-center-back",
+                                               "d-tail-base"), "back", "none"))) %>%
+  mutate(side = ifelse(parameter %in% c( "d-front-left", 
+                                         "d-back-left", 
+                                         "d-head", "d-center-front", "d-center-back", "d-tail-base"), "left", 
+                       ifelse(parameter %in% c("d-front-right",
+                                               "d-back-right"), "right", "none")))
+
+
+# Identify the speed of toe tips, this is a good indicator if the mouse is in a stance or swing position 
+Speed_down_pre <- pre_down_analysis %>% 
+  group_by(day, mouse, parameter, full_id) %>%
+  mutate(speed = abs(x_corr- lag(x_corr, default = first(x_corr)))) %>% # calculate speed from pervious x_coor
+  mutate(phase = ifelse(speed >7, NA, parameter)) %>% # Speed defined as 7 pixels/frame  
+  mutate(phase_names = ifelse(speed >7, "swing", "stance")) %>% # define swing and stance
+  mutate(phase_numbers = cumsum(phase_names != lag(phase_names, default= first(phase_names)))) %>% # count phases
+  group_by(full_id, phase_numbers) %>%
+  mutate(Max_speed = max(speed))  %>% # max speed per phase number
+  filter(Max_speed < 100) %>%   # max speed is in pixel per frames 
+  group_by(full_id) %>%
+  mutate(Max_steps = max(phase_numbers)) %>%
+  filter(Max_steps > 10) %>%
+  group_by(day, full_id, parameter, phase_numbers, phase_names) %>%
+  mutate(Max_Time_in_phase = max(time)-min(time)) %>%
+  mutate(day_Num = as.numeric(gsub("[^0-9.]", "",  day))) # Make new column with numeric day
+
+# subset only toes and convert pixel per frames in cm/s 
+Speed_down <- Speed_down_pre %>% 
+   filter(parameter %in% c("d-front-left","d-front-right", "d-back-left","d-back-right")) %>%
+   mutate(parameter = factor(parameter, levels = c("d-front-left","d-back-left", "d-back-right","d-front-right"))) %>%
+   mutate(Max_speed_true = Max_speed/31.3667*60) %>% # convert pixel per frames in cm/s 
+   mutate(speed_true = speed/31.3667*60) %>%
+  mutate(parameter = factor(parameter, levels = c("d-front-left", "d-back-left", "d-back-right", "d-front-right")))
+
+limbcolors <- brewer.pal(4, "Set1")
+mycolors3 <- colorRampPalette(brewer.pal(6, "Set2"))(6)
+
+# Look at distribution of speed in the individual frames 
+PLOT_DOWN_Analysis_Speed_QC <- ggplot(Speed_down, aes(Max_speed_true, fill= phase_names)) +
+  scale_fill_manual(values=mycolors3)+
+  geom_histogram(binwidth= 10)+
+  scale_x_continuous(limits = c(0, 150))+
+  theme_bw()
+PLOT_DOWN_Analysis_Speed_QC
+
+
+# Look at duration in the phase 
+PLOT_DOWN_Analysis_Speed_Phase_QC <- ggplot(Speed_down, aes(Max_Time_in_phase, fill= day)) +
+  scale_fill_manual(values=mycolors3)+
+  geom_histogram(binwidth= 1)+
+  facet_wrap(phase_names~., scales = "free")+
+theme_bw()
+PLOT_DOWN_Analysis_Speed_Phase_QC
+
+```
+
+
+```{r fig.height=5, fig.width=10}
+
+# We select individual videos and look how the speed determines a step cycle
+ Speed_down_select <- Speed_down %>% filter(full_id %in% c("0days_Mouse_ID1", "3days_Mouse_ID1")) 
+
+# Plot the walk profile from down as a function of speed. It is probably the best parameter so far to determine steps.
+
+PLOT_Speed <- ggplot(Speed_down_select, aes(x=time, y = speed_true)) +
+  geom_line(aes(color=parameter)) +
+  facet_wrap(full_id~parameter, scales = "free", ncol=4)+
+  geom_hline(yintercept=7)+
+  theme(strip.text = element_text(size=10))+
+  theme(legend.position = "none")+
+  scale_color_manual(values=limbcolors)+
+ scale_fill_manual(values=limbcolors)+
+  theme_minimal()
+PLOT_Speed
+
+```
+
+```{r fig.height=2.5, fig.width=10, warning=FALSE}
+
+# Next, we can plot the step-profile and the synchronization of individual selected videos 
+PLOT_Speed_2 <- ggplot(Speed_down_select, aes(x=time, y = parameter)) +
+  geom_tile(aes(fill=phase), height = 0.95)+
+  scale_fill_manual(values = limbcolors ,na.value = "white")+
+  theme_classic()+
+  scale_x_continuous(limits=(c(0,90)))+
+ facet_wrap(full_id~., scales = "free")+
+  theme(legend.position = "none")+
+  theme_minimal()
+PLOT_Speed_2
+
+# Determining the Step cycle
+Speed_down_cycle <- Speed_down %>%  
+  filter(phase_names == "stance") %>%
+  group_by(mouse, day, full_id, phase_numbers) %>%
+  mutate(relative_time = time - min(time)) 
+
+ # Determining the Step cycle of individual videos 
+Speed_down_cycle_select <- Speed_down_select %>%  
+  filter(phase_names == "stance") %>%
+  group_by(mouse, day, full_id, phase_numbers) %>%
+  mutate(relative_time = time - min(time)) 
+
+PLOT_Speed_3 <- ggplot(Speed_down_cycle_select, aes(x=relative_time, y = parameter)) +
+  geom_boxplot(aes(fill=phase))+
+  scale_fill_manual(values = limbcolors ,na.value = "white")+  
+  scale_x_continuous(limits=(c(0,NA)))+
+  facet_wrap(full_id~., scales = "free")+
+  theme_minimal()
+PLOT_Speed_3
+
+```
+
+
+# (6) Analysis of down step profile 
+Here begin's the analysis of the data
+
+```{r fig.height=5.5, fig.width=8, message=FALSE, warning=FALSE}
+# Here begins the analysis from the down perspective for all data 
+# How synchronized are the opposite limbs for that you need to take the time difference between fl + br and bl + fl
+
+# 1) Synchronization 
+#  Changes in relative time of FL and HR + FR and HL
+DOWN_SMRY_SYNCHR <- Speed_down %>%
+  ungroup() %>%
+  select(-c("x_corr", "y_corr", "likelyhood", "Max_speed", "Max_steps", "Max_Time_in_phase", "side", "limb", "phase", "speed", "phase_numbers", "Max_speed_true", "speed_true")) %>%
+  spread(parameter, phase_names) %>%
+  rename(FL = "d-front-left", FR = "d-front-right", BL = "d-back-left", BR = "d-back-right")  %>%
+  drop_na() %>%
+  filter(!(FL == "stance" & FR == "stance" & BL == "stance" & BR == "stance" )) %>%
+  mutate(FLBR = ifelse(FL == BR, "SYNC", "ASYNC")) %>%
+  mutate(FRBL = ifelse(FR == BL, "SYNC", "ASYNC"))
+
+DOWN_SMRY_SMRY_SYNCHR <- DOWN_SMRY_SYNCHR %>%
+  group_by(mouse, full_id, day, day_Num) %>%
+  summarize(FLBR_SYM = sum(FLBR == "SYNC"),
+            FLBR_ASYM = sum(FLBR == "ASYNC"), 
+            FRBL_SYM = sum(FRBL == "SYNC"),
+            FRBL_ASYM = sum(FRBL == "ASYNC")) %>%
+  mutate(FLBR_RATIO = 1- FLBR_SYM/(FLBR_SYM+FLBR_ASYM),
+         FRBL_RATIO = 1- FRBL_SYM/(FRBL_SYM+FRBL_ASYM)) %>%
+group_by(full_id, mouse, day, day_Num) %>%
+  summarize(FLBR_RATIO = median(FLBR_RATIO), 
+            FRBL_RATIO= median(FRBL_RATIO)) %>%
+  gather(Parameter, Value, FLBR_RATIO, FRBL_RATIO) 
+
+
+COLOR1 <- c("white", rev(brewer.pal(5,"Blues")))
+
+PLOT_DOWN_SYNC <- ggplot(DOWN_SMRY_SMRY_SYNCHR, aes(x=as.factor(day_Num), y = Value)) +
+  facet_wrap(.~Parameter, scales= "free")+
+  #stat_summary(aes(fill = day), geom="bar", fun.data = "mean_se",  alpha=0.27) +
+  stat_boxplot(geom = "errorbar", width = 0.5)+
+  geom_boxplot(aes(fill=day), outlier.shape = NA)+
+  geom_jitter(width=0.1, alpha=0.4, pch=21,size=2.5, fill ="lightgrey")+
+  stat_summary(fun=mean, geom="point", shape=23, size=4, color="black", fill ="white")+
+  scale_y_continuous(limits = c(0, NA))+
+  scale_color_manual(values=COLOR1)+
+  scale_fill_manual(values=COLOR1)+
+  theme_bw()+
+  theme(legend.position="none")
+#PLOT_DOWN_SYNC
+
+
+COLOR2 <- c("white", rev(brewer.pal(5,"Greens")))
+
+# 2) Cycle duration in s
+Cycle_duration <- Speed_down_cycle %>% 
+  group_by(mouse, day, full_id, phase_numbers, day_Num) %>%
+  summarize(duration = max(relative_time)-min(relative_time), sd = sd(relative_time)) %>%
+  group_by(full_id, mouse, day,day_Num) %>%
+  summarize(avg_duration = median(duration)/60, duration_sd_diff= median(sd)/60)%>% # in seconds
+  gather(Parameter, Value, avg_duration:duration_sd_diff) 
+
+
+COLOR2 <- c("white", rev(brewer.pal(5,"Purples")))
+
+PLOT_DOWN_CYCLE <- ggplot(Cycle_duration, aes(x=as.factor(day_Num), y = Value)) +
+  facet_wrap(.~Parameter, scales = "free")+
+  stat_boxplot(geom = "errorbar", width = 0.5)+
+  geom_boxplot(aes(fill=day), outlier.shape = NA)+
+  geom_jitter(width=0.1, alpha=0.4, pch=21,size=2.5, fill ="lightgrey")+
+  stat_summary(fun=mean, geom="point", shape=23, size=4, color="black", fill ="white")+
+  scale_y_continuous(limits = c(0, NA))+
+  scale_color_manual(values=COLOR2)+
+  scale_fill_manual(values=COLOR2)+
+  theme_bw()+
+  theme(legend.position="none")
+#PLOT_DOWN_CYCLE
+
+
+# 3) Stride length and sd in cm
+Stride_length <- Speed_down_cycle %>% 
+  group_by(mouse, day, day_Num,  full_id, phase_numbers, side) %>%
+  summarize(stride_length = max(x_corr)-min(x_corr), sd=sd(x_corr)) %>%
+  group_by(full_id, mouse, day, day_Num) %>%
+  summarize(avg_stride_length = median(stride_length)/31.37, stride_length_sd_diff = median(sd)/31.37) %>% # in cm 
+  gather(Parameter, Value, avg_stride_length:stride_length_sd_diff) %>%
+  drop_na()
+
+COLOR3 <- c("white", rev(brewer.pal(5,"Greens")))
+
+PLOT_DOWN_LENGTH <- ggplot(Stride_length, aes(x=as.factor(day_Num), y = Value)) +
+  facet_wrap(.~Parameter, scales = "free")+
+  stat_boxplot(geom = "errorbar", width = 0.5)+
+  geom_boxplot(aes(fill=day), outlier.shape = NA)+
+  geom_jitter(width=0.1, alpha=0.4, pch=21,size=2.5, fill ="lightgrey")+
+  stat_summary(fun=mean, geom="point", shape=23, size=4, color="black", fill ="white")+
+  scale_y_continuous(limits = c(0, NA))+
+  scale_color_manual(values=COLOR3)+
+  scale_fill_manual(values=COLOR3)+
+  theme_bw()+
+  theme(legend.position="none")
+#PLOT_DOWN_LENGTH
+
+# 4) Stance and Swing time in s 
+Stance_Swing_time <- Speed_down_cycle %>%
+  group_by(mouse, day,full_id, phase_numbers, parameter, side, day_Num) %>%
+  summarize(max = max(time, na.rm=T), min = min(time, na.rm = T)) %>%
+  group_by(parameter) %>%
+  mutate(stance_time = max-min, swing_time = min - lag(max, default = first(max))) %>%
+  filter(phase_numbers != 0) %>%
+  group_by(full_id, mouse, day,  day_Num) %>%
+  summarize(avg_stance_time = median(stance_time)/60, avg_swing_time = median(swing_time)/60) %>%
+  gather(Parameter, Value, avg_stance_time:avg_swing_time) 
+
+COLOR4 <- c("white", rev(brewer.pal(5,"Oranges")))
+
+PLOT_DOWN_Stance_Swing <- ggplot(Stance_Swing_time, aes(x=as.factor(day_Num), y = Value)) +
+  stat_boxplot(geom = "errorbar", width = 0.5)+
+  geom_boxplot(aes(fill=day), outlier.shape = NA)+
+  geom_jitter(width=0.1, alpha=0.4, pch=21,size=2.5, fill ="lightgrey")+
+  stat_summary(fun=mean, geom="point", shape=23, size=4, color="black", fill ="white")+
+  facet_wrap(.~Parameter, scales = "free")+
+  scale_color_manual(values=COLOR4)+
+  scale_fill_manual(values=COLOR4)+
+  scale_y_continuous(limits = c(0, NA))+
+  theme_bw()+
+  theme(legend.position="none")
+ # PLOT_DOWN_Stance_Swing
+
+# Plot all together
+sync_plots <- grid.arrange(PLOT_DOWN_SYNC,PLOT_DOWN_CYCLE,PLOT_DOWN_LENGTH,PLOT_DOWN_Stance_Swing)
+
+```
+
+# (7) Down Analysis: Width, Length and angle of steps to center of body 
+
+Next, we look at step profile (1) how wide the steps (L and R) are, (2) how long the steps are and (3) the angles relative to the center of the body 
+
+```{r fig.height=7, fig.width=10}
+
+# We take only the stance moment and select columns of interest
+step_wide_length_pre <- Speed_down %>% filter(phase_names == "stance")%>%
+  group_by(full_id, mouse, parameter, phase_numbers,day) %>%
+  mutate(min_speed = min(speed)) %>%
+  group_by(full_id, mouse, parameter,  day, phase_numbers) %>%
+  filter(time == min(time)) %>% # take the very first moment of stance, to exclude corrections of the paws after landing ¨
+  ungroup() %>%
+  select(time, x_corr,y_corr, parameter, full_id, day, mouse, phase_numbers)  
+
+
+# We add now the position to the time of the d-center-back + d-center-front and link them to the correct steps. We retrieve the central body parts from the data frame Speed_down
+centerBody_step_wide_length <- Speed_down_pre %>% 
+  filter(parameter %in% c("d-center-back", "d-center-front"))  %>% 
+  ungroup() %>%
+  select(time, x_corr,y_corr, parameter, full_id, day, mouse) %>% 
+  rename(c(x_corrBL = x_corr, y_corrBL = y_corr, parameterBL = parameter))
+ 
+# Merge both together and subtract the coordinates to have relative width and length of steps 
+step_wide_length <- step_wide_length_pre %>%
+  inner_join(centerBody_step_wide_length, by = c("full_id", "time", "day","mouse")) %>%
+  mutate(dist_y = abs(y_corr - y_corrBL), dist_x = abs(x_corr - x_corrBL)) 
+
+
+# We extract all values related to the centerBody
+centerBody_walk <- step_wide_length %>% select(time, phase_numbers, x_corrBL, y_corrBL, parameterBL, full_id, day, mouse) %>% rename(c(x_corr = x_corrBL, y_corr=  y_corrBL, parameter= parameterBL))
+
+
+step_wide_length_walk <- step_wide_length %>% bind_rows(centerBody_walk) %>%
+  group_by(full_id, mouse, phase_numbers, parameter) %>%
+  mutate(x_corr= mean(x_corr), y_corr = mean(y_corr)) %>% 
+  distinct(phase_numbers, .keep_all=TRUE) %>%
+  drop_na()
+
+```
+
+Let's plot the profile of a walk per day
+
+```{r fig.height=3, fig.width=10}
+
+
+step_wide_length_walk_selected <- step_wide_length_walk %>%
+ filter(full_id %in% c("0days_Mouse_ID1", "3days_Mouse_ID1", "0days_Mouse_ID2", "3days_Mouse_ID2")) 
+
+PLOT_Walk <- ggplot(step_wide_length_walk_selected, aes(x= x_corr, y=y_corr)) +
+  geom_point(aes(color=as.factor(parameter)), alpha = 0.4) +
+  facet_wrap(.~day, nrow=1, scales= "free") +
+   theme_bw()
+PLOT_Walk
+
+
+```
+
+Next we look at the summary of step_wide_length to see the average and maximum x and y limb-distance to center of body 
+
+```{r fig.height=5, fig.width=8, message=FALSE, warning=FALSE}
+
+Summary_step_wide_length <- step_wide_length %>%
+  group_by(full_id,  parameter,day) %>%
+  summarize(avg_y = mean(dist_y),avg_x = mean(dist_x),
+            max_y = unname(quantile(dist_y, 0.95)), max_x = unname(quantile(dist_x, 0.95)), # max values are determined by upper .95 values
+            min_y = unname(quantile(dist_y, 0.05)), min_x = unname(quantile(dist_x, 0.05))) %>% # min values are deteminerd by lowest .05 values 
+  gather(category, value, avg_y:min_x) %>%
+  mutate(parameter = factor(parameter, levels = c("d-front-left", "d-back-left", "d-back-right", "d-front-right")))
+
+limbcolors <- brewer.pal(4, "Set1")
+
+
+PLOT_Wide_Length <- ggplot(Summary_step_wide_length, aes(x= day, y=value)) +
+   stat_boxplot(geom = "errorbar", width = 0.5)+
+   geom_boxplot(aes(fill=parameter)) +
+  stat_summary(fun=mean, geom="point", shape=23, size=3, color="black", fill ="white")+
+   geom_jitter(width=0.1, alpha=0.4, pch=21,size=2.5, fill ="lightgrey")+
+   facet_wrap(category~parameter, scales = "free", ncol=8)+
+  scale_fill_manual(values=limbcolors)+
+   theme_bw()+
+  theme(legend.position="none")
+PLOT_Wide_Length
+
+```
+
+ Next, we add the angle between back-center + front-center and the respective toes  
+
+```{r message=FALSE}
+
+
+# right front x
+angles_right_front_x <-  Speed_down_pre %>% ungroup() %>%
+  filter(parameter %in% c("d-front-right"  , "d-center-front")) %>%
+  select(parameter, x_corr, full_id, day,time) %>%
+  spread(parameter, x_corr, convert = F) %>% drop_na()
+
+# right front y
+angles_right_front_y <-  Speed_down_pre %>% ungroup() %>%
+  filter(parameter %in% c("d-front-right" ,  "d-center-front")) %>%
+  select(parameter, y_corr, full_id, day,time) %>%
+  spread(parameter, y_corr, convert = F) %>% drop_na()
+
+# left front x
+angles_left_front_x <-  Speed_down_pre %>% ungroup() %>%
+  filter(parameter %in% c("d-front-left"  , "d-center-front")) %>%
+  select(parameter, x_corr, full_id, day,time) %>%
+  spread(parameter, x_corr, convert = F) %>% drop_na()
+
+# left front y
+angles_left_front_y <-  Speed_down_pre %>% ungroup() %>%
+  filter(parameter %in% c("d-front-left" , "d-center-front")) %>%
+  select(parameter, y_corr, full_id, day,time) %>%
+  spread(parameter, y_corr, convert = F) %>% drop_na()
+
+# right back x
+angles_right_back_x <-  Speed_down_pre %>% ungroup() %>%
+  filter(parameter %in% c("d-back-right" , "d-center-back" )) %>%
+  select(parameter, x_corr, full_id, day,time) %>%
+  spread(parameter, x_corr, convert = F) %>% drop_na()
+
+# right back y
+angles_right_back_y <-  Speed_down_pre %>% ungroup() %>%
+  filter(parameter %in% c("d-back-right" , "d-center-back"  )) %>%
+  select(parameter, y_corr, full_id, day,time) %>%
+  spread(parameter, y_corr, convert = F) %>% drop_na()
+
+# left back x
+angles_left_back_x <-  Speed_down_pre %>% ungroup() %>%
+  filter(parameter %in% c("d-back-left" , "d-center-back" )) %>%
+  select(parameter, x_corr, full_id, day, time) %>%
+  spread(parameter, x_corr, convert = F) %>% drop_na()
+
+# left back y
+angles_left_back_y <-  Speed_down_pre %>% ungroup() %>%
+  filter(parameter %in% c("d-back-left" , "d-center-back" )) %>%
+  select(parameter, y_corr, full_id, day,time) %>%
+  spread(parameter, y_corr, convert = F) %>% drop_na()
+
+
+angle_rf<- left_join(angles_right_front_x, angles_right_front_y,  by = c("full_id","day",  "time"))
+angle_lf<- left_join(angles_left_front_x, angles_left_front_y,  by = c("full_id","day",  "time"))
+angle_rb<- left_join(angles_right_back_x, angles_right_back_y,  by = c("full_id","day",  "time"))
+angle_lb<- left_join(angles_left_back_x, angles_left_back_y,  by = c("full_id","day", "time"))
+
+## We will calculate the angle using atan2: angle = atan2(vector2.y, vector2.x) - atan2(vector1.y, vector1.x); Since we have points its the equivalent of: angle= atan2(P3.y - P1.y, P3.x - P1.x) -  atan2(P2.y - P1.y, P2.x - P1.x);
+ 
+angle_rf_calc <- angle_rf %>%
+  mutate(dy = `d-front-right.y`-`d-center-front.y`, dx = (`d-front-right.x`-`d-center-front.x`)) %>%
+  mutate(angle = abs(atan2(dy,dx)*-180/pi)) %>% # - 180 -> because its the right side -> right is higher than center  
+  mutate(angle = ifelse(angle>90, angle-90, angle)) %>%
+  add_column(joint = "RF")
+  
+angle_lf_calc <- angle_lf %>% 
+   mutate(dy = `d-front-left.y`-`d-center-front.y`, dx = (`d-front-left.x`-`d-center-front.x`)) %>%
+  mutate(angle = abs(atan2(dy,dx)*180/pi)) %>%
+  mutate(angle = ifelse(angle>90, angle-90, angle)) %>%
+   add_column(joint = "LF")
+
+angle_rb_calc <- angle_rb %>% 
+    mutate(dy = `d-back-right.y`-`d-center-back.y`, dx = (`d-back-right.x`-`d-center-back.x`)) %>%
+  mutate(angle = abs(atan2(dy,dx)*-180/pi)) %>% # - 180 -> because its the right side -> right is higher than center  
+    mutate(angle = ifelse(angle>90, angle-90, angle)) %>%
+   add_column(joint = "RB")
+
+angle_lb_calc <- angle_lb %>% 
+  mutate(dy = `d-back-left.y`-`d-center-back.y`, dx = (`d-back-left.x`-`d-center-back.x`)) %>%
+  mutate(angle = abs(atan2(dy,dx)*180/pi)) %>%
+    mutate(angle = ifelse(angle>90, angle-90, angle)) %>%
+   add_column(joint = "LB")
+
+
+# Merge all data frames from individual angles 
+
+summary_angle_down <- bind_rows(angle_rf_calc, angle_lf_calc, angle_rb_calc, angle_lb_calc) %>%
+    group_by(full_id, day, joint) %>%
+  summarize(max_Angle= unname(quantile(angle, 0.95)), min_Angle= unname(quantile(angle, 0.1)), avg_Angle =mean(angle, na.rm = T) ) %>%
+  gather(Parameter, Value, max_Angle:avg_Angle) %>%
+  mutate(joint = factor(joint, levels = c("LF", "LB", "RB", "RF")))%>% # add parameter joint composed of side and limb
+mutate(side = ifelse(joint %in% c("LF", "LB"), "left", "right")) %>%
+  mutate(limb = ifelse(joint %in% c("LF", "RF"), "front", "back"))
+
+
+```
+
+```{r fig.height=2.5, fig.width=8, warning=FALSE}
+
+
+# Let's first look at the angles between toes and body center in an individual mouse
+all_angle_down <- bind_rows(angle_rf_calc, angle_lf_calc, angle_rb_calc, angle_lb_calc) %>%
+  select(full_id, day, angle, joint,time) %>%
+  drop_na() %>%
+ filter(full_id %in% c("0days_Mouse_ID1")) %>% 
+ filter(time > 5) %>%
+  mutate(side = ifelse(joint %in% c("LF", "LB"), "left", "right")) %>%
+  mutate(limb = ifelse(joint %in% c("LF", "RF"), "front", "back")) %>%
+  mutate(joint = factor(joint, levels = c("LF", "LB", "RB", "RF")))
+
+
+limbcolors <- brewer.pal(4, "Set1")
+
+PLOT_angle_down_single <- ggplot(all_angle_down, aes(x=time, y=angle))+
+ geom_point(aes(color=joint), size = 1, alpha = 0.2) +
+  geom_spline(aes(color=joint), spar = 0.3)+
+  facet_wrap(limb~side, scales = "free", nrow =1)+
+    scale_color_manual(values=limbcolors)+
+ scale_fill_manual(values=limbcolors)+
+  scale_y_continuous(limits = c(0,90))+
+  scale_x_continuous(limits = c(0,85))+
+  theme_bw()
+PLOT_angle_down_single
+
+##ggsave("PubFig//DOWN_03_Angles_representative_plot.pdf", PLOT_angle_down_single,  width = 5, height = 2.5, limitsize = F)
+
+```
+
+
+```{r fig.height=4, fig.width=8}
+limbcolors <- brewer.pal(4, "Set1")
+limbcolors <- c("#E41A1C33" ,"#377EB833" ,"#4DAF4A33", "#984EA333")
+
+
+PLOT_Angle<- ggplot(summary_angle_down, aes(day, Value)) +
+   stat_boxplot(geom = "errorbar", width = 0.5)+
+   geom_boxplot(aes(fill=joint), fill = "white", alpha = 1, outlier.shape = NA) +
+   geom_boxplot(aes(fill=joint), alpha = .9, outlier.shape = NA) +
+   geom_jitter(width=0.1, alpha=0.4, pch=21,size=2.5, fill ="lightgrey")+
+   stat_summary(fun=mean, geom="point", shape=23, size=4, color="black", fill ="white")+
+  facet_wrap(Parameter~limb~side, scales = "free", nrow = 2)+
+  scale_y_continuous(limits = c(NA, NA)) +
+  scale_color_manual(values=limbcolors)+
+ scale_fill_manual(values=limbcolors)+
+  theme_bw()
+PLOT_Angle
+
+##ggsave("PubFig//DOWN_03_Angles_all_plots.pdf", PLOT_Angle,  width = 4.5, height = 9, limitsize = F)
+
+```
+
+
+# (8) Side Analysis: Vertical Analysis, (X-Axis)
+We finished the down perspective and are now focusing on the analysis from thw two side perspectives (left, right) 
+
+```{r}
+# Create vertical_df and link body parts to front or back or down 
+vertical_df_pre <- long_data_clean2 %>% 
+mutate(limb = ifelse(parameter %in% c("l-wrist",
+                                        "l-front-toe-tip", 
+                                        "l-elbow", 
+                                        "l-shoulder", 
+                                        "r-wrist",
+                                        "r-front-toe-tip", 
+                                        "r-elbow", 
+                                        "r-shoulder", "l-head", "r-head"), "front", 
+                ifelse(parameter %in% c("l-back-ankle",
+                                        "l-back-toe", 
+                                        "r-back-ankle",
+                                        "r-back-toe", "l-hip", "r-hip", "l-iliac-crest", "r-iliac-crest", "l-tail-base", "r-tail-base"), "back", "none"))) %>% 
+filter(side != "down") # exclude down perspective
+
+# Add information about when a step starts and ends from Down Analysis to Side Analysis
+
+steps_from_down_analysis <- Speed_down %>% ungroup() %>%
+  filter(phase_names == "stance") %>%
+  select(full_id, side, limb, phase_numbers,time) %>%
+  distinct(full_id, side, limb, phase_numbers, .keep_all=T)
+
+vertical_df_steps <- vertical_df_pre %>% left_join(steps_from_down_analysis, by=c("full_id", "side", "limb", "time")) %>%
+   fill(phase_numbers) %>%
+   mutate(y_rel = y_corr/31.3667) # in cm 
+ 
+
+
+  
+```
+
+```{r fig.height=2.5, fig.width=9}
+# Add parameter_short, important for subsequent analysis 
+vertical_df_steps$parameter_short <- substr(vertical_df_steps$parameter, 3, nchar(as.character(vertical_df_steps$parameter)))
+vertical_df_steps$side <- factor(vertical_df_steps$side, levels =c("left", "right"))
+vertical_df_steps$limb <- factor(vertical_df_steps$limb, levels =c("back", "front"))
+
+
+# Plot the data, you should see a regular pattern and vertical lines determining the step cycle
+validation_vertical_df_steps_test <- vertical_df_steps %>% filter(parameter %in% c("r-wrist", "l-wrist", 
+                                                                                   "r-back-ankle", "l-back-ankle",
+                                                                                   "l-back-toe", "r-back-toe",
+                                                                                   "l-front-toe-tip", "r-front-toe-tip",
+                                                                                   "l-shoulder", "r-shoulder",
+                                                                                   "l-hip", "r-hip"))
+
+validation_vertical_df_steps_test$side <- factor(validation_vertical_df_steps_test$side, levels =c("right", "left"))
+validation_vertical_df_steps_test <- validation_vertical_df_steps_test %>% group_by(full_id, side, limb, phase_numbers) %>% mutate(x_time = min(time)) 
+
+validation_vertical_df_steps_select <- validation_vertical_df_steps_test %>%
+   filter(full_id %in% c("0days_Mouse_ID1"))
+
+
+PLOT_validation_step_region <- ggplot(validation_vertical_df_steps_select, aes(x=time, y=y_rel))+
+  geom_line(aes(color=factor(parameter_short)))+
+  facet_wrap(side~full_id~limb, scales = "free", ncol=4)+
+  scale_x_continuous(limits = c(NA, NA))+
+  geom_vline(aes(xintercept = as.numeric(x_time)))  +
+  scale_y_continuous(limits = c(0, NA))+
+  theme_classic()+
+  theme(strip.text = element_text(size=4))
+PLOT_validation_step_region
+##ggsave("PubFig/TEST_RR_05B_step_into-walk_profile_clean.pdf", PLOT_validation_step_region, width=9, height=3, limitsize = F)
+
+```
+
+Start of analysis
+
+```{r fig.height=3, fig.width=8}
+
+# Summarize the values:
+summary_vertical_analysis_df_stroked <-  vertical_df_steps %>%
+  group_by(mouse, side, parameter_short, phase_numbers, full_id, day)  %>% # you do the calculation for every step
+  mutate(y_max=max(y_corr), y_min=min(y_corr), mean = mean(y_corr)) %>% # Identify the highest, lowest, middle coordinate per step
+  mutate(y_max_norm = y_max-y_min, mean_norm = mean - y_min, y_min_norm = y_min - y_min) %>%   # Relative heights per step
+  group_by(mouse, side, parameter_short, full_id, day) %>%  # You calculate for all steps the parameters 
+  mutate(Movement = median(y_max_norm), Average_Height = median(mean_norm), Baseline = median(y_min_norm)) %>%
+  ungroup() %>%
+  distinct(Movement, .keep_all = T)
+
+
+# Quality control for distribution of all values
+PLOT_Vertical_Analysis_QC <- ggplot(summary_vertical_analysis_df_stroked, aes(Movement, fill = day)) +
+    geom_histogram(binwidth= 2) +
+    theme(legend.position = "none") +
+   scale_fill_manual(values=c(mycolors3))+ 
+  theme_bw()
+PLOT_Vertical_Analysis_QC 
+
+```
+
+
+```{r fig.height=6, fig.width=10, message=FALSE, warning=FALSE}
+
+
+summary_summary_vertical_analysis_df_2 <- summary_vertical_analysis_df_stroked %>%
+  filter(Movement < 30 & Movement > 5) %>%  # here you add the QC observation
+  gather(Measure, Value, Movement:Baseline)  %>%
+  filter(Measure != "Baseline") %>% 
+  group_by(full_id, mouse, side, parameter_short, parameter, day,Measure)%>%
+  summarize(Value = median(Value)) # Remove 0 Values that you confirmed previously
+
+
+summary_summary_vertical_analysis_df_2$day_Num <- as.numeric(gsub("[^0-9.]", "",  summary_summary_vertical_analysis_df_2$day))
+
+vertical_analysis_df_zero <- summary_summary_vertical_analysis_df_2 %>% filter(day_Num == 0) %>%
+  group_by(parameter,Measure) %>%
+  summarize(Value_BL = median(Value))
+
+summary_summary_vertical_analysis_df_3 <- summary_summary_vertical_analysis_df_2 %>% left_join(vertical_analysis_df_zero, by = c("parameter", "Measure")) %>%
+  mutate(Value = Value-Value_BL) %>%
+  mutate(Value= Value/31.3667*10) # in mm
+
+
+summary_summary_vertical_analysis_df_4 <- summary_summary_vertical_analysis_df_3  %>%
+    filter(parameter_short != "head") # not important parameter
+
+
+summary_summary_vertical_analysis_df_5 <- summary_summary_vertical_analysis_df_3  %>%
+    filter(parameter_short != "head") %>%
+    filter(day %in% c("0days", "3days", "21days"))
+
+
+PLOT_FIRST_OVERVIEW_VERTICAL_BARPLOT<- ggplot(summary_summary_vertical_analysis_df_5, aes(x=as.factor(day), y = Value))+
+  stat_boxplot(geom = "errorbar", width = 0.5)+
+  geom_boxplot(aes(fill=parameter_short), fill = "white", alpha = 1, outlier.shape = NA) +
+   geom_boxplot(aes(fill=parameter_short), alpha = .9, outlier.shape = NA) +
+   geom_jitter(width=0.1, alpha=0.4, pch=21,size=2.5, fill ="lightgrey")+
+   stat_summary(fun=mean, geom="point", shape=23, size=4, color="black", fill ="white")+
+  facet_wrap(Measure~side~parameter_short, scales = "free", ncol = 9 )+
+  scale_y_continuous(limits = c(NA, NA))+
+    geom_hline(yintercept=0, linetype="dotted")+
+  theme_bw()
+PLOT_FIRST_OVERVIEW_VERTICAL_BARPLOT
+
+
+PLOT_SECOND_OVERVIEW_Vertical_TIMECOURSE <- ggplot(summary_summary_vertical_analysis_df_4, aes(x=(day_Num), y = Value))+
+  stat_summary(aes(fill=parameter_short), geom="ribbon", fun.data = "median_se",  alpha=0.2) +
+  stat_summary(aes(color=parameter_short),fun=median, geom="line") +
+  stat_summary(aes(fill=parameter_short), fun=median, geom="point", color = "black", shape=21, size =3, alpha = 0.7) +
+ facet_wrap(Measure~side~parameter_short, scales = "free", ncol = 9 )+
+  scale_y_continuous(limits = c(NA, NA))+
+  geom_hline(yintercept=0, linetype="dotted")+
+  theme_bw()
+PLOT_SECOND_OVERVIEW_Vertical_TIMECOURSE
+
+
+#ggsave("PubFig/06C3_Second_Overview_Vertical_Analysis12_non_normalized5.pdf", PLOT_SECOND_OVERVIEW_Vertical_TIMECOURSE, width=4.9, height=36, limitsize =F)
+
+```
+
+# (9) Horizontal View, Protraction, Retraction. Here, we observe the horizontal movements of the mouse (X-Axis) 
+
+```{r}
+horizontal_df <- vertical_df_steps %>% 
+  group_by(mouse,full_id, day, limb, side, parameter_short, phase_numbers) %>%
+  mutate(x_max = max(x_corr), x_min = min(x_corr), mean = mean(x_corr)) %>%
+  mutate(Movement = x_max - x_min) %>%
+  distinct(Movement, .keep_all = T) %>% # Collapse Elements 
+  ungroup()%>%
+  group_by(mouse,full_id, day, limb, side, parameter_short) %>%
+  mutate(Average_Step_Size = median(Movement), Max_Step_Size = max(Movement), Min_Step_Size = min(Movement)) %>%
+  distinct(Average_Step_Size, .keep_all = T) # Collapse the elements
+
+# Quality Control for Data -> show distribution of all data briefly 
+
+PLOT_Horizontal_Analysis_QC <- ggplot(horizontal_df, aes(Average_Step_Size, fill= day)) +
+  geom_histogram(binwidth= 10) +
+  theme_bw()+
+  scale_fill_manual(values=mycolors3)
+PLOT_Horizontal_Analysis_QC
+
+```
+
+
+Protraction and Retraction
+
+```{r fig.height=4, fig.width=10}
+##### Protraction and Retraction  ####
+##### To calculate Pro- and retraction, we need to refer to the relative distance between the toe tips and the hip, respectively the shoulder
+
+### Minimal and maximal toe distance per step
+horizontal_df_toe <- vertical_df_steps %>% filter(parameter_short %in% c("back-toe","front-toe-tip", "hip", "shoulder"))
+
+hip_steps <- vertical_df_steps %>% 
+   filter(parameter_short %in%  c("hip", "shoulder")) %>%
+  select(time, side, limb, x_corr, parameter_short, mouse, full_id, day, phase_numbers)
+
+# Calculate protraction and retraction
+horizontal_df_steps <- left_join(hip_steps, horizontal_df_toe, by = c("full_id", "day", "mouse",  "side", "limb", "time", "phase_numbers")) %>%
+  mutate(distance = x_corr.y - x_corr.x) %>%
+  group_by(full_id, day, mouse, side, limb, parameter_short.y,parameter) %>%
+  summarise(retraction = unname(quantile(distance, 0.05)), protraction = unname(quantile(distance, 0.95)), average=mean(distance), median = median(distance))%>%
+  gather(Measure, Value, retraction:median) %>%
+  filter(Value < 60 & Value > - 100) %>%
+  filter(!(parameter_short.y %in% c("shoulder", "hip")))
+
+
+# Normalize to baseline
+horizontal_df_steps_zero <- horizontal_df_steps %>% filter(day == "0days") %>%
+  group_by(parameter,Measure) %>%
+  summarize(Value_BL = median(Value))
+
+new_hz_steps <- horizontal_df_steps %>% left_join(horizontal_df_steps_zero, by = c("parameter", "Measure")) %>%
+  mutate(Value = Value-Value_BL)  %>%
+   mutate(Value= Value/31.3667*10) # in mm
+
+new_hz_steps$day_Num <- as.numeric(gsub("[^0-9.]", "",  new_hz_steps$day))
+
+
+colors_toes <- c("#FBB040","#2AB34B")
+
+## plot retraction and protraction
+PLOT_Protraction_Retraction <- ggplot(new_hz_steps, aes(x=day, y=Value))+
+  stat_boxplot(geom = "errorbar", width = 0.5)+
+  geom_boxplot(aes(fill=parameter_short.y), fill = "white", alpha = 1, outlier.shape = NA) +
+   geom_boxplot(aes(fill=parameter_short.y), alpha = .9, outlier.shape = NA) +
+   geom_jitter(width=0.1, alpha=0.4, pch=21,size=2.5, fill ="lightgrey")+
+   stat_summary(fun=mean, geom="point", shape=23, size=3, color="black", fill ="white")+
+  facet_wrap(Measure~side~parameter_short.y, scales = "free", ncol = 8 )+
+  scale_fill_manual(values=c(colors_toes))+ 
+  scale_y_continuous(limits = c(NA, NA))+
+  geom_hline(yintercept=0, linetype="dotted")+
+  theme_bw()
+PLOT_Protraction_Retraction
+
+PLOT_Protraction_Retraction_line <- ggplot(new_hz_steps, aes(x=(day_Num), y = Value))+
+  stat_summary(aes(fill=parameter_short.y), geom="ribbon", fun.data = "median_se",  alpha=0.2) +
+  stat_summary(aes(color=parameter_short.y),fun=median, geom="line") +
+  stat_summary(aes(fill=parameter_short.y), fun=median, geom="point", color = "black", shape=21, size =3, alpha = 0.7) +
+  facet_wrap(Measure~side, scales = "free", ncol = 8 )+
+  scale_fill_manual(values=c(colors_toes))+ 
+  scale_color_manual(values=c(colors_toes))+ 
+  scale_y_continuous(limits = c(NA, NA))+
+  geom_hline(yintercept=0, linetype="dotted")+
+  theme_bw()
+PLOT_Protraction_Retraction_line
+
+
+```
+
+ 
+# Duration per step of each limb from side perspective 
+
+```{r fig.height=3, fig.width=8, message=FALSE, warning=FALSE}
+
+## Step duration of individual paws 
+duration_steps <- vertical_df_steps %>%
+  group_by(full_id, day, mouse,  side,limb, phase_numbers) %>%
+  summarize(duration = max(time)) %>%
+  mutate(duration_minus = duration - lag(duration, default = first(duration))) %>%
+  mutate(seconds = duration_minus/60) %>% # We imaged with 60 fps 
+  filter(phase_numbers >=3 ) %>%
+  group_by(full_id, day, mouse, side, limb) %>%
+  summarize(seconds = median(seconds)) %>%
+  unite(joint, side, limb, sep = "_", remove = F) %>%
+  mutate(joint = factor(joint, levels = c("left_front", "left_back", "right_back", "right_front")))
+
+
+limbcolors <- brewer.pal(4, "Set1")
+
+# Plot duration of a step 
+PLOT_DURATION_of_STEP <- ggplot(duration_steps, aes(x=as.factor(day), y=seconds))+
+  stat_boxplot(geom = "errorbar", width = 0.5)+
+  geom_boxplot(aes(fill=side), fill = "white", alpha = 1, outlier.shape = NA) +
+   geom_boxplot(aes(fill=joint), alpha = .9, outlier.shape = NA) +
+   geom_jitter(width=0.1, alpha=0.4, pch=21,size=2.5, fill ="lightgrey")+
+   stat_summary(fun=mean, geom="point", shape=23, size=4, color="black", fill ="white")+
+  facet_wrap(side~limb, scales = "free", nrow = 1)+
+  scale_color_manual(values=colors)+
+  scale_fill_manual(values=limbcolors)+
+  scale_y_continuous(limits = c(0,NA))+
+  theme_bw()
+PLOT_DURATION_of_STEP
+
+```
+
+Distance covered by 1 step from side perspective 
+
+```{r fig.height=3, fig.width=6, message=FALSE, warning=FALSE}
+movement_per_step <- vertical_df_steps %>% 
+  group_by(full_id,day, mouse, limb, side, phase_numbers, parameter_short) %>%
+  summarize(x_corr = mean(x_corr)) %>%
+  filter(parameter_short == "hip") %>% # reference to movement is the hip 
+  group_by(full_id,day, mouse, limb, side, parameter_short) %>%
+  mutate(x_corr_diff = x_corr - lag(x_corr, default = first(x_corr))) %>%
+  filter(phase_numbers > 2) %>%
+  group_by(full_id, day, mouse, side, limb) %>% # per video
+  summarize(x_corr_diff = median(x_corr_diff))
+
+# Plot distance during a step 
+PLOT_Distance_covered_per_step <- ggplot(movement_per_step, aes(x=day, y= x_corr_diff))+ 
+   stat_boxplot(geom = "errorbar", width = 0.5)+
+   geom_boxplot(aes(fill=side), fill = "white", alpha = 1, outlier.shape = NA) +
+   geom_boxplot(aes(fill=side), alpha = .9, outlier.shape = NA) +
+   geom_jitter(width=0.1, alpha=0.4, pch=21,size=2.5, fill ="lightgrey")+
+  facet_grid(.~side, scales = "free")+
+    scale_fill_manual(values=limbcolors)+
+   stat_summary(fun=mean, geom="point", shape=23, size=4, color="black", fill ="white")+
+  theme_bw()
+PLOT_Distance_covered_per_step
+
+```
+
+
+# (9.1 Angles Side View)
+
+```{r fig.height=25, fig.width=4}
+
+# subset relevant joints to calculate the angles
+vertical_analysis_df_stroked_angle <- filter(vertical_df_steps, parameter_short %in% c("wrist", "shoulder", "elbow", "front-toe-tip", "hip", "iliac-crest", "back-ankle", "back-toe")) %>%
+  select(-c(likelyhood, y_rel))
+
+# subset data between sides, limbs and x and y coordinates
+test_left_x_fr <- vertical_analysis_df_stroked_angle %>% ungroup () %>%  filter(side == "left" & limb == "front")%>% select(-c(parameter, y_corr))  %>% spread(parameter_short, x_corr, convert = F)
+test_left_y_fr <- vertical_analysis_df_stroked_angle %>%  filter(side == "left" & limb =="front")%>% select(-c(parameter, x_corr)) %>%  spread(parameter_short, y_corr, convert = F)
+test_right_x_fr <- vertical_analysis_df_stroked_angle %>%   filter(side == "right" & limb == "front")%>%  select(-c(parameter, y_corr)) %>%  spread(parameter_short, x_corr, convert = F)
+test_right_y_fr <- vertical_analysis_df_stroked_angle %>%   filter(side == "right" & limb == "front") %>% select(-c(parameter, x_corr)) %>%  spread(parameter_short, y_corr, convert = F)
+test_left_x_ba <- vertical_analysis_df_stroked_angle %>%  filter(side == "left" & limb == "back")%>% select(-c(parameter, y_corr)) %>% spread(parameter_short, x_corr, convert = F)
+test_left_y_ba <- vertical_analysis_df_stroked_angle %>%  filter(side == "left" & limb =="back")%>% select(-c(parameter, x_corr)) %>%  spread(parameter_short, y_corr, convert = F)
+test_right_x_ba <- vertical_analysis_df_stroked_angle %>%   filter(side == "right" & limb == "back")%>%  select(-c(parameter, y_corr)) %>%  spread(parameter_short, x_corr, convert = F)
+test_right_y_ba <- vertical_analysis_df_stroked_angle %>%   filter(side == "right" & limb == "back") %>% select(-c(parameter, x_corr)) %>%  spread(parameter_short, y_corr, convert = F)
+
+left_angle_fr <- left_join(test_left_x_fr, test_left_y_fr,  by = c("full_id", "mouse", "day", "limb", "side", "time", "phase_numbers"))
+right_angle_fr <- left_join(test_right_x_fr, test_right_y_fr, by = c("full_id", "mouse", "day", "limb", "side", "time", "phase_numbers"))
+left_angle_ba <- left_join(test_left_x_ba, test_left_y_ba,  by = c("full_id","mouse", "day",  "limb", "side", "time", "phase_numbers"))
+right_angle_ba <- left_join(test_right_x_ba, test_right_y_ba, by = c("full_id", "mouse" ,"day",  "limb", "side", "time", "phase_numbers"))
+
+```
+
+```{r fig.height=3, fig.width=5}
+
+# Arctan (see calculation angles down)
+left_angle_fr_calc <- left_angle_fr %>%
+  mutate(shoulder_ellbow_wrist = (atan2((wrist.y-elbow.y), (wrist.x-elbow.x))- atan2((shoulder.y-elbow.y), (shoulder.x-elbow.x)))*180/pi) %>%
+  mutate(ellbow_wrist_toetip = (atan2((`front-toe-tip.y`-wrist.y), (`front-toe-tip.x`-wrist.x))- atan2((elbow.y-wrist.y), (elbow.x-wrist.x)))*180/pi) %>%
+  select(-c(elbow.x, `front-toe-tip.x`, shoulder.x, wrist.x , elbow.y, `front-toe-tip.y`, shoulder.y,  wrist.y)) %>%
+  gather(Joints, Angle, shoulder_ellbow_wrist:ellbow_wrist_toetip) %>%
+  drop_na() %>%
+  filter(Angle < 180)
+
+
+right_angle_fr_calc <- right_angle_fr %>%
+  mutate(shoulder_ellbow_wrist = (atan2((wrist.y-elbow.y), (wrist.x-elbow.x))- atan2((shoulder.y-elbow.y), (shoulder.x-elbow.x)))*180/pi) %>%
+  mutate(ellbow_wrist_toetip = (atan2((`front-toe-tip.y`-wrist.y), (`front-toe-tip.x`-wrist.x))- atan2((elbow.y-wrist.y), (elbow.x-wrist.x)))*180/pi) %>%
+  select(-c(elbow.x, `front-toe-tip.x`, shoulder.x, wrist.x , elbow.y, `front-toe-tip.y`, shoulder.y,  wrist.y)) %>%
+  gather(Joints, Angle, shoulder_ellbow_wrist:ellbow_wrist_toetip) %>%
+  drop_na() %>%
+  filter(Angle < 180) 
+
+left_angle_back_calc <- left_angle_ba %>%
+  mutate(iliac_hip_ankle = (atan2((`back-ankle.y`-hip.y), (`back-ankle.x`-hip.x))- atan2((`iliac-crest.y`-hip.y), (`iliac-crest.x`-hip.x)))*180/pi) %>%
+  mutate(hip_ankle_toe = (atan2((`back-toe.y`-`back-ankle.y`), (`back-toe.x`-`back-ankle.x`))- atan2((hip.y-`back-ankle.y`), (hip.x-`back-ankle.x`)))*180/pi) %>%
+  select(-c(`back-ankle.x` , `back-ankle.y`, `back-toe.x`, `back-toe.y`,  hip.x, hip.y ,`iliac-crest.x`, `iliac-crest.y`)) %>%
+  gather(Joints, Angle,  iliac_hip_ankle:hip_ankle_toe) %>%
+  drop_na() %>%
+  filter(Angle < 180) 
+
+right_angle_back_calc <- right_angle_ba %>%
+  mutate(iliac_hip_ankle = (atan2((`back-ankle.y`-hip.y), (`back-ankle.x`-hip.x))- atan2((`iliac-crest.y`-hip.y), (`iliac-crest.x`-hip.x)))*180/pi) %>%
+  mutate(hip_ankle_toe = (atan2((`back-toe.y`-`back-ankle.y`), (`back-toe.x`-`back-ankle.x`))- atan2((hip.y-`back-ankle.y`), (hip.x-`back-ankle.x`)))*180/pi)%>%
+  select(-c(`back-ankle.x` , `back-ankle.y`, `back-toe.x`, `back-toe.y`,  hip.x, hip.y ,`iliac-crest.x`, `iliac-crest.y`)) %>%
+  gather(Joints, Angle,  iliac_hip_ankle:hip_ankle_toe) %>%
+  drop_na() %>%
+  filter(Angle < 180)
+
+# Merge individual data frames to calculate the angles
+all_horizontal_angles <- bind_rows(left_angle_back_calc, right_angle_back_calc, left_angle_fr_calc, right_angle_fr_calc) %>%
+  drop_na() %>%
+ filter(time > 5) %>%
+  mutate(Angle = abs(Angle)) %>%
+  filter(Angle < 180)
+
+# select indivudal video
+selected_horizontal_angles <- all_horizontal_angles %>% filter(full_id %in% c("0days_Mouse_ID1"))
+
+
+PLOT_selected_horizontal_Angle <- ggplot(selected_horizontal_angles, aes(x=time, y=Angle))+
+ geom_point(aes(color=Joints), size = 1, alpha = 0.2) +
+  geom_spline(aes(color=Joints), spar = 0.4)+
+  facet_grid(limb~side, scales = "free")+
+  theme_bw()
+PLOT_selected_horizontal_Angle
+
+
+```
+
+```{r fig.height=6, fig.width=10, message=FALSE, warning=FALSE}
+
+summary_horizontal_angles <- bind_rows(left_angle_back_calc, right_angle_back_calc, left_angle_fr_calc, right_angle_fr_calc) %>%
+  drop_na() %>%
+  group_by(mouse, full_id, day, limb, side, Joints) %>%
+  summarize(max_Angle= unname(quantile(Angle, 0.95)), min_Angle= unname(quantile(Angle, 0.1)), avg_Angle =mean(Angle)) %>%
+  gather(Parameter, Value, max_Angle:avg_Angle) %>%
+  mutate(Value = abs(Value))
+
+summary_horizontal_angles$day_Num <- as.numeric(gsub("[^0-9.]", "",  summary_horizontal_angles$day))
+
+
+
+PLOT_Angle<- ggplot(summary_horizontal_angles, aes(day, abs(Value))) +
+  stat_boxplot(geom = "errorbar", width = 0.5)+
+  geom_boxplot(aes(fill=Joints), fill = "white", alpha = 1, outlier.shape = NA) +
+   geom_boxplot(aes(fill=Joints), alpha = .9, outlier.shape = NA) +
+   geom_jitter(width=0.1, alpha=0.4, pch=21,size=2.5, fill ="lightgrey")+
+   stat_summary(fun=mean, geom="point", shape=23, size=4, color="black", fill ="white")+
+  facet_wrap(Parameter~Joints~side, scales = "free", ncol = 8)+
+  scale_y_continuous(limits = c(NA, NA))+
+  theme_bw()
+PLOT_Angle
+
+
+
+```
+
+```{r fig.height=2.5, fig.width=10}
+
+PLOT_horizontal_Angle_line <- ggplot(summary_horizontal_angles, aes(x=(day_Num), y = Value))+
+ # geom_ribbon(aes(fill = group_id), stat = 'summary', fun.data = 'mean_sem', alpha = 0.2)+
+  stat_summary(aes(fill=Joints), geom="ribbon", fun.data = "median_se",  alpha=0.2) +
+  stat_summary(aes(color=Joints),fun=median, geom="line") +
+  stat_summary(aes(fill=Joints), fun=median, geom="point", color = "black", shape=21, size =3, alpha = 0.7) +
+  facet_wrap(Parameter~side, scales = "free", ncol= 6)+
+  theme_bw()
+PLOT_horizontal_Angle_line
+
+##ggsave("PubFig//Horizontal_Angle_all2.pdf", PLOT_horizontal_Angle_line, width=5, height=9)
+```
+# (10) Summary generated values in Paper 
+
+```{r message=FALSE, warning=FALSE}
+# Raw Data
+# (1) Analysis from down perspective: Synchronization, Cycle duration, Stride length, Stance and Swing time, Angles 
+analysis_down <- DOWN_SMRY_SMRY_SYNCHR %>% 
+  bind_rows(Cycle_duration)  %>% 
+  bind_rows(Stride_length) %>%
+  bind_rows(Stance_Swing_time) %>% 
+  rename(Measure = Parameter) %>%
+  ungroup() %>% 
+  select(full_id, day, mouse, Measure, Value) %>%
+  mutate(ParameterGroup = "SynchrCycle_downPersp")
+
+# (1.1) Analysis Angles from down perspective 
+angle_down <- summary_angle_down %>%
+  ungroup() %>%
+  unite(Measure, joint, Parameter, sep = "__") %>%
+  mutate(mouse = as.factor(sub(".*Mouse_", "" , summary_angle_down$full_id))) %>%
+  select(full_id, day, mouse, Measure, Value) %>%
+  mutate(ParameterGroup = "Angles_downPersp")
+
+
+# (2) Side Perspective Vertical view, heights
+analysis_vertical <- summary_summary_vertical_analysis_df_3 %>%
+  ungroup() %>%
+  unite(Measure, parameter, Measure, sep = "__") %>%
+  select(full_id, day, mouse, Measure, Value) %>%
+  rename(Value = Value) %>%
+  mutate(ParameterGroup = "VerticalHeight_Analysis_sidePersp")
+
+# (3) Side Perspective Horizontal Analysis, Protraction, Retraction
+analysis_pro_ret <- new_hz_steps %>%
+  unite(Measure, side, limb, Measure, sep = "__") %>%
+  ungroup() %>% 
+  select(full_id, day, mouse, Measure, Value) %>%
+  mutate(ParameterGroup = "ProtractionRetraction_sidePrsp")
+
+# (3.1) Side Perspective Duration and Moement per step    
+  
+analysis_duration <- duration_steps %>%
+  rename(Value = seconds) %>%
+  mutate(Measure = "seconds") %>%
+  ungroup() %>%
+  unite(Measure, side, limb, Measure, sep = "__") %>%
+  select(full_id, day, mouse, Measure, Value) %>%
+  mutate(ParameterGroup = "duration_step_sidePersp")
+
+analysis_steps <- movement_per_step %>%
+  rename(Value = x_corr_diff) %>%
+  mutate(Measure = "movement_per_step") %>%
+  ungroup() %>%
+  unite(Measure, side, limb, Measure, sep = "__") %>%
+  select(full_id ,day,  mouse, Measure, Value) %>%
+  mutate(ParameterGroup = "moement_per_step_sidePersp")
+
+# (3.2) Angles from Side Perspective
+angles_horizontal <- summary_horizontal_angles %>% 
+  ungroup()%>%
+  rename(Measure = Parameter)%>%
+  unite(Measure, Measure, side, limb, Joints, sep = "__") %>%
+   select(full_id ,day, mouse, Measure, Value) %>%
+  mutate(ParameterGroup = "angles_horizontal_sidePersp")
+
+all_raw_data <- analysis_down %>%
+  bind_rows(angle_down) %>% 
+  bind_rows(analysis_vertical) %>% 
+  bind_rows(analysis_pro_ret) %>% 
+  bind_rows(angles_horizontal) %>% 
+  bind_rows(analysis_duration) %>%
+  bind_rows(analysis_steps)
+
+glimpse(all_raw_data)
+
+# Summary with mean + SD
+all_sum_data <- all_raw_data %>%
+  group_by(day, Measure, ParameterGroup) %>%
+  summarize(Mean = mean(Value), median = median(Value), sd = sd(Value), sem = sd(Value) / sqrt(length(Value)) )
+  
+glimpse(all_sum_data)
+
+
+
+```
+
+
+# (11) Export all plots and .csv files - remove comment #
+
+```{r}
+# Eport all plots
+# ggsave("Output_Runway_Analysis/Output Figures/1_PLOT_bar_all_videos.pdf", PLOT_bar_all_videos, width=4, height=2.5)
+# ggsave("Output_Runway_Analysis/Output Figures/2_PLOT_Donut_Summary_Validation.pdf", PLOT_Donut_Summary_Validation, width=10, height=3)
+# ggsave("Output_Runway_Analysis/Output Figures/3_1_PLOT_control_for_outliers_before.pdf", PLOT_control_for_outliers_before, width=5, height=4)
+# ggsave("Output_Runway_Analysis/Output Figures/3_2_PLOT_control_for_outliers_after.pdf", PLOT_control_for_outliers_after, width=5, height=4)
+# ggsave("Output_Runway_Analysis/Output Figures/4_1_PLOT_Overview_Distribution_X.pdf", PLOT_Overview_Distribution_X, width=8, height=8)
+# ggsave("Output_Runway_Analysis/Output Figures/4_2_PLOT_Overview_Distribution_Y.pdf", PLOT_Overview_Distribution_Y, width=8, height=8)
+# ggsave("Output_Runway_Analysis/Output Figures/5_PLOT_overview_steps.pdf", PLOT_overview_steps, width=12, height=8)
+# ggsave("Output_Runway_Analysis/Output Figures/6_1_PLOT_DOWN_Analysis_Speed_QC.pdf", PLOT_DOWN_Analysis_Speed_QC, width=3, height=2)
+# ggsave("Output_Runway_Analysis/Output Figures/6_2_sync_plots.pdf", sync_plots, width=6, height=4)
+# ggsave("Output_Runway_Analysis/Output Figures/7_1_PLOT_FIRST_OVERVIEW_VERTICAL_BARPLOT.pdf", PLOT_FIRST_OVERVIEW_VERTICAL_BARPLOT, width=15, height=8)
+# ggsave("Output_Runway_Analysis/Output Figures/7.2_PLOT_SECOND_OVERVIEW_Vertical_TIMECOURSE.pdf", PLOT_SECOND_OVERVIEW_Vertical_TIMECOURSE, width=15, height=8)
+# ggsave("Output_Runway_Analysis/Output Figures/8_1_PLOT_Horizontal_Analysis_QC.pdf", PLOT_Horizontal_Analysis_QC, width=3, height=3)
+# ggsave("Output_Runway_Analysis/Output Figures/8.2_PLOT_Protraction_Retraction.pdf", PLOT_Protraction_Retraction, width=15, height=6)
+# ggsave("Output_Runway_Analysis/Output Figures/8_3_PLOT_Protraction_Retraction_line.pdf", PLOT_Protraction_Retraction_line, width=15, height=3)
+# ggsave("Output_Runway_Analysis/Output Figures/9_1_PLOT_DURATION_of_STEPE.pdf", PLOT_DURATION_of_STEP, width=4, height=3)
+# ggsave("Output_Runway_Analysis/Output Figures/9_2_PLOT_Distance_covered_per_step.pdf", PLOT_Distance_covered_per_step, width=4, height=2)
+# ggsave("Output_Runway_Analysis/Output Figures/10_1_PLOT_selected_horizontal_Angle.pdf", PLOT_selected_horizontal_Angle, width=5, height=4)
+# ggsave("Output_Runway_Analysis/Output Figures/10_2_PLOT_horizontal_Angle_line.pdf", PLOT_horizontal_Angle_line, width=15, height=4)
+
+# Eport all data 
+# write.csv(all_raw_data, "Output_Runway_Analysis/Output csv files/all_raw_data.csv")
+# write.csv(all_sum_data, "Output_Runway_Analysis/Output csv files/all_summarized_data.csv")
+
+```
+

@@ -10,7 +10,7 @@
 
 - Do not change the order structure or rename the files, this may cause errors in the script.
 
-- Note that the .csv files represent the output from DeepLabCut. We have randomly selected representative videos to give you an example of the data processing. Due to the random selection the output files do not necessarily show the same findings as described in the manuscript. If your set-up is different you may need to adapt the script. You are welcome to contact ruslan.rust@irem.uzh.ch for further help / collaboration. 
+- Note that the .csv files represent the output from DeepLabCut. We have randomly selected representative videos from baseline and 3 days post injury to give you an example of the data processing. Due to the random selection the output files do not necessarily show the exact same values as described in the manuscript. If your set-up is different you may need to adapt the script. You are welcome to contact ruslan.rust@irem.uzh.ch for further help / collaboration. 
 
 - You can choose between a) "Runway_Analysis.Rmd" and b) "Ladder_Rung_Analysis.Rmd". 
 a) The runway analysis provides key calculations and codes described in the paper that covers reliability calculations, analysis from the down side (e..g synchronization, step definition, speed, stance and swing time etc), analysis from lateral side (heights, lengths, angles etc.) 
@@ -31,7 +31,11 @@ b) The ladder rung analysis provides key calculations to identify missteps durin
 
 ### (3) REGULAR USE
 
-- Please let us know if you identify errors or you made improvements to the script, we will try to continuously update the code 
+- Please let us know if you identify errors or you made improvements to the script, we will continuously update the code 
+
+- We are also happy to receive updates regarding your projects that are based on this script.
+
+- Please send all inquiries to ruslan.rust@irem.uzh.ch 
 
 
 

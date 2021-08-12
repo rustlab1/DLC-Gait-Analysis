@@ -9,7 +9,7 @@ version: 1.0
 # (1) Required Packages, Initialization, Customized Functions, 
 ```{r message=FALSE, warning=FALSE}
 # Download these required packages 
-packages <-  c("plyr","ggplot2","RColorBrewer","scales","emmeans", "gridExtra", "FSA", "tidyr", "mise", "stringr", "plotrix", "ggpmisc", "tibble", "forcats", "data.table", "dplyr")
+packages <-  c("plyr","ggplot2","RColorBrewer","scales","emmeans", "gridExtra", "FSA", "tidyr", "mise", "stringr", "plotrix", "ggpmisc", "tibble", "forcats", "data.table", "dplyr", "ggformula")
 invisible(lapply(packages, library, character.only = TRUE))
 
 # Clearing all previous data, plots, etc
